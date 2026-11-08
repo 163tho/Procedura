@@ -34,6 +34,9 @@
  *   PROCEDURA_LLM_MAX_ATTEMPTS  max attempts within the deadline (default 5)
  */
 
+import { trackedFetch } from "../tracking/fetch.ts";
+import { recordRetryWait } from "../tracking/context.ts";
+
 const envInt = (name: string, fallback: number): number => {
   const raw = process.env[name];
   const n = raw !== undefined ? Number(raw) : NaN;
@@ -190,7 +193,7 @@ const wrapped = async (
       // guards instead: the per-attempt budget below, and the per-chunk idle
       // deadline on the body — those bound IDLE time and total attempts without
       // capping a healthy stream that is still emitting tokens.
-      const res = await fetch(input, { ...init, signal, timeout: false } as RequestInit);
+      const res = await trackedFetch(input, { ...init, signal, timeout: false } as RequestInit);
       if (res.ok || !RETRYABLE_STATUS.has(res.status) || attempt === LLM_MAX_ATTEMPTS) {
         // Headers arrived → the per-attempt budget covered time-to-headers and
         // the `finally` clears it. The body would then stream UNGUARDED (that is
@@ -240,7 +243,9 @@ const wrapped = async (
         : `attempt ${attempt}/${LLM_MAX_ATTEMPTS}`) +
       ` failed: ${lastErr?.message ?? "unknown"}; retrying in ${delay}ms`,
     );
+    const waitStart = performance.now();
     await sleep(delay);
+    recordRetryWait(performance.now() - waitStart);
   }
   throw lastErr ?? new Error("llm fetch: deadline reached without a response");
 };

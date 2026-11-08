@@ -19,7 +19,7 @@
  */
 
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 
 /** Filesystem types that are slow enough to be worth staging around. */
@@ -83,6 +83,15 @@ export function beginStaging(
   log(`[staging] writing to local disk ${workDir}`);
   log(`[staging]   -> will sync to ${finalDir}`);
 
+  // Seed resumes with their existing artifacts. Tracking files remain live at
+  // the final destination and must never be overwritten by staged copies.
+  const exclusions = ["--exclude=/run.json", "--exclude=/api_calls.jsonl", "--exclude=/.run.lock"];
+  if (existsSync(finalDir)) {
+    const seed = Bun.spawnSync(["rsync", "-a", ...exclusions, finalDir.replace(/\/+$/, "") + "/", workDir + "/"],
+      { stdout: "pipe", stderr: "pipe" });
+    if (seed.exitCode !== 0) throw new Error("Cannot stage existing output: " + seed.stderr.toString().slice(0, 300));
+  }
+
   let done = false;
   const finish = (label: string): void => {
     if (done) return;
@@ -91,7 +100,7 @@ export function beginStaging(
       mkdirSync(finalDir, { recursive: true });
       const t0 = Date.now();
       // Trailing slash on the source copies its CONTENTS into finalDir.
-      const p = Bun.spawnSync(["rsync", "-a", `${workDir}/`, `${finalDir}/`],
+      const p = Bun.spawnSync(["rsync", "-a", ...exclusions, `${workDir}/`, `${finalDir}/`],
         { stdout: "pipe", stderr: "pipe" });
       const secs = ((Date.now() - t0) / 1000).toFixed(1);
       if (p.exitCode === 0) {
@@ -108,4 +117,21 @@ export function beginStaging(
     }
   };
   return { workDir, finish };
+}
+
+/** Map returned artifact paths after a successful staging sync. */
+export function rebaseStagedPaths<T>(value: T, workDir: string, finalDir: string): T {
+  const source = resolve(workDir), destination = resolve(finalDir);
+  if (source === destination) return value;
+  const visit = (item: unknown): unknown => {
+    if (typeof item === "string") {
+      if (item === source) return destination;
+      return item.startsWith(source + sep) ? destination + item.slice(source.length) : item;
+    }
+    if (Array.isArray(item)) return item.map(visit);
+    if (item && typeof item === "object")
+      return Object.fromEntries(Object.entries(item).map(([key, child]) => [key, visit(child)]));
+    return item;
+  };
+  return visit(value) as T;
 }

@@ -22,6 +22,7 @@
  *                            (studio HDRI, edge-wear, grime, clearcoat)
  */
 
+import { inStage } from "../tracking/context.ts";
 import { fileURLToPath } from "node:url";
 import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { join, resolve, dirname, basename } from "node:path";
@@ -687,7 +688,7 @@ export async function runPaint(opts: PaintOpts): Promise<PaintResult> {
         raw = ""; reasoning = "";
         try {
           const tLLM = Date.now();
-          const events = await harness.llm.generate(route, req);
+          const events = await inStage("paint." + label, () => harness.llm.generate(route, req));
           addStageFor(label, Date.now() - tLLM);
           for (const ev of events) {
             if (ev.kind === "text-delta") raw += ev.text;

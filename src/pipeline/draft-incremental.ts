@@ -2217,11 +2217,11 @@ export async function runIncrementalDraft(
   emit("run.started", { runId });
 
   async function llmGenerate(
-    system: string, userContent: CanonicalPart[],
+    system: string, userContent: CanonicalPart[], label: string,
   ): Promise<{ rawText: string; reasoning: string }> {
     const tLLM = Date.now();
     const r = await generateOnce({
-      route, model: scadModelRef, system, parts: userContent,
+      route, model: scadModelRef, system, parts: userContent, label,
       ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
     });
     addStage("llm.generate", Date.now() - tLLM);
@@ -2416,7 +2416,7 @@ export async function runIncrementalDraft(
         const { rawText, reasoning } = await llmGenerate(planSystem, [
           { kind: "text", text: planUserText },
           ...refParts("Reference image"),
-        ]);
+        ], "draft.plan");
         writeFileSync(join(outDir, "plan_response.txt"), rawText, "utf8");
         if (reasoning.trim()) writeFileSync(join(outDir, "plan_thinking.txt"), reasoning, "utf8");
         recordTurn("(plan request)", true, rawText, reasoning, { stage: "plan", attempt });
@@ -2486,7 +2486,7 @@ export async function runIncrementalDraft(
         ];
         let rawText = ""; let reasoning = "";
         try {
-          ({ rawText, reasoning } = await llmGenerate(planReviewSystem, reviewParts));
+          ({ rawText, reasoning } = await llmGenerate(planReviewSystem, reviewParts, "draft.plan_review"));
         } catch (e) {
           log(`      plan-review iter ${iter} call failed: ${(e as Error).message} — keeping plan`);
           break;
@@ -2644,7 +2644,7 @@ export async function runIncrementalDraft(
         }
         let rawText = ""; let reasoning = "";
         try {
-          ({ rawText, reasoning } = await llmGenerate(nextPartSystem, userParts));
+          ({ rawText, reasoning } = await llmGenerate(nextPartSystem, userParts, "draft.next_part"));
         } catch (e) {
           log(`      next-part call failed: ${(e as Error).message} — ending the build here`);
           return null;
@@ -2861,7 +2861,7 @@ export async function runIncrementalDraft(
         }
 
         emit("draft.part.gen_requested", { name: part.name, attempt });
-        const { rawText, reasoning } = await llmGenerate(partSystem, userParts);
+        const { rawText, reasoning } = await llmGenerate(partSystem, userParts, "draft.part." + part.name);
         writeFileSync(join(partDir, `gen_response_${attempt}.txt`), rawText, "utf8");
         if (reasoning.trim()) writeFileSync(join(partDir, `gen_thinking_${attempt}.txt`), reasoning, "utf8");
         recordTurn(`(generate part ${part.name})`, true, rawText, reasoning, {

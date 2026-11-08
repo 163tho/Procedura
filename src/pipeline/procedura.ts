@@ -23,6 +23,8 @@
  *   { text, outputDir, redo }          — force re-draft even if artifacts exist
  */
 
+import { recordRun } from "../tracking/run-record.ts";
+import { inPhase, skipPhase } from "../tracking/context.ts";
 import { existsSync, mkdirSync, copyFileSync, writeFileSync, readFileSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 
@@ -152,6 +154,14 @@ export interface RunProceduraOpts {
   /** One extra LLM refine round fed with the Isaac validation report when
    *  validation flags issues. Default true. */
   motionSimRefine?: boolean;
+  /** Optional labels for thesis experiment aggregation. */
+  experimentName?: string;
+  datasetId?: string;
+  repetition?: number;
+  /** Final output destination when artifacts are built on a local staging disk. */
+  trackingOutputDir?: string;
+  /** Optional JSON pricing snapshot; otherwise use PROCEDURA_PRICING_FILE or built-in rates. */
+  pricingFile?: string;
   signal?: AbortSignal;
 }
 
@@ -200,6 +210,29 @@ function isDraftIncomplete(dir: string): boolean {
 }
 
 export async function runProcedura(opts: RunProceduraOpts): Promise<RunProceduraResult> {
+  return recordRun(opts.trackingOutputDir ?? opts.outputDir, opts, () => runProceduraImpl(opts), result => {
+    const draft = result.draft;
+    const parts = draft && "parts" in draft ? draft.parts : [];
+    const needsReview = !result.refine.ok || result.paint?.ok === false
+      || Boolean(result.paint?.degraded?.length) || result.motion?.ok === false;
+    return {
+      status: opts.signal?.aborted || result.refine.verdict === "aborted" ? "aborted" : needsReview ? "needs_review" : "completed",
+      outcome: {
+        draft: draft ? { ok: draft.ok, duration_ms: draft.durationMs,
+          parts_planned: "plan" in draft ? draft.plan.length : null,
+          parts_generated: "partsGenerated" in draft ? draft.partsGenerated : null,
+          failed_parts: parts.filter(part => !part.generated).map(part => part.name) } : { reused: true },
+        refine: { ok: result.refine.ok, verdict: result.refine.verdict, steps: result.refine.steps,
+          tool_calls: result.refine.toolCalls, summary: result.refine.summary },
+        paint: result.paint ? { ok: result.paint.ok, degraded: result.paint.degraded ?? [], error: result.paint.error ?? null } : null,
+        motion: result.motion ? { ok: result.motion.ok, links: result.motion.linkCount, joints: result.motion.jointCount,
+          warnings: result.motion.warnings, errors: result.motion.errors, validation: result.motion.validation ?? null } : null,
+      },
+    };
+  });
+}
+
+async function runProceduraImpl(opts: RunProceduraOpts): Promise<RunProceduraResult> {
   const outDir = resolve(opts.outputDir);
   mkdirSync(outDir, { recursive: true });
   mkdirSync(join(outDir, "_trajectory"), { recursive: true });
@@ -218,6 +251,9 @@ export async function runProcedura(opts: RunProceduraOpts): Promise<RunProcedura
   // are what is dangerous: --no-refine does not mean "leave final.* alone",
   // it means "promote the draft over final.*".
   if (opts.motionOnly) {
+    skipPhase("draft", "Motion-only invocation.");
+    skipPhase("refine", "Motion-only invocation.");
+    skipPhase("paint", "Motion-only invocation.");
     const finalScad = join(outDir, "final.scad");
     if (!existsSync(finalScad)) {
       await writer.close();
@@ -228,7 +264,7 @@ export async function runProcedura(opts: RunProceduraOpts): Promise<RunProcedura
     }
     console.log(`\n--- Phase 4 ONLY: motion export over the existing final.scad ---`);
     try {
-      const motionResult = await runMotionExport({
+      const motionResult = await inPhase("motion", () => runMotionExport({
         outputDir: outDir,
         ...(opts.motionPlanPath !== undefined ? { motionPlanPath: opts.motionPlanPath } : {}),
         ...(opts.motionModel !== undefined ? { model: opts.motionModel } : {}),
@@ -244,7 +280,7 @@ export async function runProcedura(opts: RunProceduraOpts): Promise<RunProcedura
         log: (line) => console.log(line),
         trajectorySink: writer.sink,
         trajectoryPathOverride: writer.path,
-      });
+      }));
       if (!motionResult.ok) {
         console.log(`  WARN: motion export failed: ${motionResult.errors.join("; ")}`);
       }
@@ -285,10 +321,11 @@ export async function runProcedura(opts: RunProceduraOpts): Promise<RunProcedura
           `Either point at a dir that already has them, or pass a prompt.`,
         );
       }
+      const draftText = opts.text;
       if (opts.incremental) {
         console.log(`\n--- Phase 1: draft (incremental, part-by-part) ---`);
-        draftResult = await runIncrementalDraft({
-          text: opts.text,
+        draftResult = await inPhase("draft", () => runIncrementalDraft({
+          text: draftText,
           outputDir: outDir,
           ...(opts.scadModel !== undefined ? { scadModel: opts.scadModel } : {}),
           ...(opts.imageModel !== undefined ? { imageModel: opts.imageModel } : {}),
@@ -305,11 +342,11 @@ export async function runProcedura(opts: RunProceduraOpts): Promise<RunProcedura
           trajectorySink: writer.sink,
           trajectoryPathOverride: writer.path,
           ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
-        });
+        }));
       } else {
         console.log(`\n--- Phase 1: draft ---`);
-        draftResult = await runDraft({
-          text: opts.text,
+        draftResult = await inPhase("draft", () => runDraft({
+          text: draftText,
           outputDir: outDir,
           ...(opts.scadModel !== undefined ? { scadModel: opts.scadModel } : {}),
           ...(opts.imageModel !== undefined ? { imageModel: opts.imageModel } : {}),
@@ -317,7 +354,7 @@ export async function runProcedura(opts: RunProceduraOpts): Promise<RunProcedura
           exportStl,
           trajectorySink: writer.sink,
           trajectoryPathOverride: writer.path,
-        });
+        }));
       }
       if (!draftResult.ok) {
         await writer.close();
@@ -327,11 +364,13 @@ export async function runProcedura(opts: RunProceduraOpts): Promise<RunProcedura
         );
       }
     } else {
+      skipPhase("draft", "Existing draft artifacts reused.");
       console.log(`\n--- Phase 1: draft SKIPPED (artifacts present in ${outDir}) ---`);
     }
 
     let refineResult: RefineResult;
     if (opts.refine === false) {
+      skipPhase("refine", "Refinement disabled; promoting draft.");
       console.log(`\n--- Phase 2: refine SKIPPED (--no-refine) — promoting draft → final ---`);
       refineResult = await promoteDraftAsFinal(outDir, writer.path, exportStl);
     } else {
@@ -342,7 +381,7 @@ export async function runProcedura(opts: RunProceduraOpts): Promise<RunProcedura
       const refineMode = process.env["PROCEDURA_REFINE_MODE"] === "agent" ? "agent" : "direct";
       console.log(`\n--- Phase 2: refine (${refineMode}) ---`);
       const refineImpl = refineMode === "agent" ? runRefine : runDirectRefine;
-      refineResult = await refineImpl({
+      refineResult = await inPhase("refine", () => refineImpl({
         outputDir: outDir,
         ...(opts.agentModel !== undefined ? { model: opts.agentModel } : {}),
         ...(opts.maxSteps !== undefined ? { maxSteps: opts.maxSteps } : {}),
@@ -350,8 +389,11 @@ export async function runProcedura(opts: RunProceduraOpts): Promise<RunProcedura
         ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
         trajectorySink: writer.sink,
         trajectoryPathOverride: writer.path,
-      });
+      }));
     }
+
+    if (!opts.paint) skipPhase("paint", "Paint not requested.");
+    if (!opts.motion) skipPhase("motion", "Motion not requested.");
 
     // ── Phase 3: paint (opt-in material pass) ─────────────────────────────
     // Operates on final.scad + image.png (written by Phase 2 in both the
@@ -361,13 +403,13 @@ export async function runProcedura(opts: RunProceduraOpts): Promise<RunProcedura
     let paintResult: PaintResult | undefined;
     if (opts.paint) {
       console.log(`\n--- Phase 3: paint (per-part material pass) ---`);
-      paintResult = await runPaint({
+      paintResult = await inPhase("paint", () => runPaint({
         outputDir: outDir,
         ...(opts.paintModel !== undefined ? { model: opts.paintModel } : {}),
         ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
         trajectorySink: writer.sink,
         trajectoryPathOverride: writer.path,
-      });
+      }));
       if (!paintResult.ok) {
         console.log(`  WARN: paint phase failed: ${paintResult.error ?? "unknown"}`);
       }
@@ -380,7 +422,7 @@ export async function runProcedura(opts: RunProceduraOpts): Promise<RunProcedura
     let motionResult: MotionExportResult | undefined;
     if (opts.motion) {
       console.log(`\n--- Phase 4: motion export (OpenUSD / Isaac Sim) ---`);
-      motionResult = await runMotionExport({
+      motionResult = await inPhase("motion", () => runMotionExport({
         outputDir: outDir,
         ...(opts.motionPlanPath !== undefined ? { motionPlanPath: opts.motionPlanPath } : {}),
         ...(opts.motionModel !== undefined ? { model: opts.motionModel } : {}),
@@ -396,7 +438,7 @@ export async function runProcedura(opts: RunProceduraOpts): Promise<RunProcedura
         log: (line) => console.log(line),
         trajectorySink: writer.sink,
         trajectoryPathOverride: writer.path,
-      });
+      }));
       if (!motionResult.ok) {
         console.log(`  WARN: motion export failed: ${motionResult.errors.join("; ")}`);
       } else if (motionResult.validation?.ran && motionResult.validation.ok !== true) {

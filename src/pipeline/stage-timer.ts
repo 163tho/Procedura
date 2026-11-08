@@ -12,6 +12,7 @@
  * their parent and leaves the arithmetic to the reader.
  */
 
+import { trackingContext, inStage } from "../tracking/context.ts";
 interface Stage { ms: number; calls: number }
 
 const stages = new Map<string, Stage>();
@@ -25,6 +26,7 @@ export function beginRun(): void {
 
 /** Add an already-measured duration to a stage. */
 export function addStage(name: string, ms: number): void {
+  trackingContext()?.recorder.addTiming(name, ms);
   const s = stages.get(name) ?? { ms: 0, calls: 0 };
   s.ms += ms;
   s.calls += 1;
@@ -33,11 +35,11 @@ export function addStage(name: string, ms: number): void {
 
 /** Time `fn`, attribute it to `name`, and return its result (errors still count). */
 export async function timeStage<T>(name: string, fn: () => Promise<T>): Promise<T> {
-  const t0 = Date.now();
+  const t0 = performance.now();
   try {
-    return await fn();
+    return await inStage(name, fn);
   } finally {
-    addStage(name, Date.now() - t0);
+    addStage(name, performance.now() - t0);
   }
 }
 

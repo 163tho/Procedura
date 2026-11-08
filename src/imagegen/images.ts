@@ -23,6 +23,8 @@
  * stage entirely.
  */
 
+import { trackedFetch } from "../tracking/fetch.ts";
+import { recordRetryWait } from "../tracking/context.ts";
 import { writeFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { generateSessionReference } from "../../mcp/runtime/session.ts";
@@ -110,7 +112,7 @@ export async function generateImage(opts: GenerateImageOpts): Promise<string> {
   let lastErr: Error | undefined;
   for (let attempt = 1; attempt <= tries; attempt++) {
     try {
-      res = await fetch(url, {
+      res = await trackedFetch(url, {
         method: "POST",
         headers: {
           "content-type": "application/json",
@@ -132,7 +134,9 @@ export async function generateImage(opts: GenerateImageOpts): Promise<string> {
     if (attempt < tries) {
       const wait = 4000 * attempt;
       log(`      [image-gen] attempt ${attempt}/${tries} failed: ${String(lastErr?.message).slice(0, 120)}; retrying in ${wait}ms`);
+      const waitStart = performance.now();
       await new Promise((r) => setTimeout(r, wait));
+      recordRetryWait(performance.now() - waitStart);
     }
   }
   if (lastErr) throw lastErr;

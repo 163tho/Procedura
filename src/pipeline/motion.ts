@@ -2133,6 +2133,7 @@ async function generateMotionJson(args: {
       result = await generateOnce({
         route: args.route,
         model: args.modelRef,
+        label: "motion." + args.label,
         system: args.systemPrompt,
         parts: userContent,
       });

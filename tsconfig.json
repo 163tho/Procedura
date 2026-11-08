@@ -1,6 +1,8 @@
 {
   "compilerOptions": {
-    "lib": ["ESNext"],
+    "lib": [
+      "ESNext"
+    ],
     "target": "ESNext",
     "module": "ESNext",
     "moduleResolution": "bundler",
@@ -14,7 +16,15 @@
     "skipLibCheck": true,
     "isolatedModules": true,
     "resolveJsonModule": true,
-    "types": ["bun"]
+    "types": [
+      "bun"
+    ]
   },
-  "include": ["src/**/*", "scripts/**/*", "mcp/runtime/**/*", "mcp/tests/**/*.ts"]
+  "include": [
+    "src/**/*",
+    "scripts/**/*",
+    "mcp/runtime/**/*",
+    "mcp/tests/**/*.ts",
+    "tests/**/*.ts"
+  ]
 }

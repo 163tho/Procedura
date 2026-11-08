@@ -106,6 +106,7 @@ report to see what the run produced.
 ## Guides
 
 - [MCP guide](docs/mcp.md): setup, text-only models, and help with failed runs.
+- [Run tracking](docs/run-tracking.md): per-run usage, cost estimates, timing and reproducibility.
 - [API guide](docs/api.md): use a model API key, run batches, or repeat a stage.
 - [Studio](web/README.md): run the web app. It uses the API setup.
 

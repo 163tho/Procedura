@@ -93,6 +93,9 @@ It reuses `OPENAI_BASE_URL` / `OPENAI_API_KEY`, so nothing else needs setting.
 
 ## Usage
 
+Every run saves `run.json` and `api_calls.jsonl` in its output directory. See
+[run tracking](run-tracking.md) for experiment labels, cost estimates and history.
+
 ### The default run
 
 Nothing to configure past the endpoint. Plans the parts, builds them one at a

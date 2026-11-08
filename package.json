@@ -19,7 +19,8 @@
     "paint": "bun run scripts/paint.ts",
     "motion": "bun run scripts/motion.ts",
     "batch": "bun run scripts/batch.ts",
-    "results": "bun run scripts/results-server.ts"
+    "results": "bun run scripts/results-server.ts",
+    "test:tracking": "bun test tests/run-tracking.test.ts"
   },
   "dependencies": {
     "@harness/template": "file:./vendor/harness",

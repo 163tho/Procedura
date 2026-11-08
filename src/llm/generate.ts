@@ -15,6 +15,7 @@
  * The harness stays where it earns its place: an agent that actually calls tools.
  */
 
+import { inStage, trackingContext } from "../tracking/context.ts";
 import { createLLMClient, applyAutoCache } from "@harness/template";
 import type {
   CanonicalRequest, CanonicalPart, CanonicalMessage,
@@ -43,6 +44,7 @@ export async function generateOnce(args: {
   system: string;
   parts: CanonicalPart[];
   signal?: AbortSignal;
+  label?: string;
 }): Promise<GenerateResult> {
   const req: CanonicalRequest = {
     model: args.model,
@@ -51,7 +53,9 @@ export async function generateOnce(args: {
   };
   applyAutoCache(req, { protocolId: args.route.protocol.id });
 
-  const events = await client.generate(args.route, req);
+  const contextStage = trackingContext()?.stage;
+  const stage = contextStage?.startsWith("llm.") ? contextStage : args.label ?? contextStage ?? "llm";
+  const events = await inStage(stage, () => client.generate(args.route, req));
   let text = "";
   let reasoning = "";
   for (const ev of events) {

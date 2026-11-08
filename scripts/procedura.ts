@@ -11,7 +11,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve as resolvePath } from "node:path";
 import { beginRun, report } from "../src/pipeline/stage-timer.ts";
-import { beginStaging } from "../src/pipeline/local-staging.ts";
+import { beginStaging, rebaseStagedPaths } from "../src/pipeline/local-staging.ts";
 import { runProcedura } from "../src/pipeline/procedura.ts";
 import { imageGenAvailable, imageGenDisabledReason } from "../src/imagegen/images.ts";
 import type { MotionCollisionApproximation } from "../src/motion/types.ts";
@@ -25,6 +25,10 @@ interface Args {
   scadModel?: string;
   imageModel?: string;
   image?: string;
+  experimentName?: string;
+  datasetId?: string;
+  repetition?: number;
+  pricingFile?: string;
   noImage: boolean;
   redo: boolean;
   oneShot: boolean;
@@ -62,6 +66,20 @@ function parseArgs(argv: string[]): Args {
     exportStl: false, paint: false, motion: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
+    if (["--experiment", "--dataset-id", "--repetition", "--pricing-file"].includes(a)) {
+      const value = argv[++i];
+      if (!value || value.startsWith("--")) { console.error(a + " requires a value"); process.exit(2); }
+      if (a === "--experiment") args.experimentName = value;
+      if (a === "--dataset-id") args.datasetId = value;
+      if (a === "--pricing-file") args.pricingFile = value;
+      if (a === "--repetition") {
+        args.repetition = Number(value);
+        if (!Number.isInteger(args.repetition) || args.repetition < 1) {
+          console.error("--repetition must be a positive integer"); process.exit(2);
+        }
+      }
+      continue;
+    }
     if (a === "-o" || a === "--output")       { args.outputDir = argv[++i]!; continue; }
     if (a === "--prompt")                     { args.prompt = argv[++i]!; continue; }
     if (a === "--prompt-file")                { args.promptFile = argv[++i]!; continue; }
@@ -162,6 +180,11 @@ Usage:
   bun run scripts/procedura.ts -o <output_dir>                    # resume on existing draft dir
 
 Options:
+  --experiment NAME     optional experiment label saved in run.json
+  --dataset-id ID       optional dataset/object identifier
+  --repetition N        optional positive repetition index
+  --pricing-file PATH   JSON rates in USD per million tokens; see docs/run-tracking.md.
+                         run.json and api_calls.jsonl are always saved beside outputs.
   --prompt TEXT          free-text prompt (alternative: --prompt-file)
   --prompt-file PATH     read prompt from a UTF-8 file
   --image PATH           reconstruct THIS image. Raises fidelity a lot — the
@@ -307,6 +330,11 @@ let result;
 try {
   result = await runProcedura({
     outputDir: staging.workDir,
+    trackingOutputDir: args.outputDir,
+    ...(args.experimentName !== undefined ? { experimentName: args.experimentName } : {}),
+    ...(args.datasetId !== undefined ? { datasetId: args.datasetId } : {}),
+    ...(args.repetition !== undefined ? { repetition: args.repetition } : {}),
+    ...(args.pricingFile !== undefined ? { pricingFile: args.pricingFile } : {}),
   ...(prompt !== undefined ? { text: prompt } : {}),
   ...(args.maxSteps !== undefined ? { maxSteps: args.maxSteps } : {}),
   ...(args.image !== undefined ? { inputImage: args.image } : {}),
@@ -344,6 +372,10 @@ try {
   throw e;
 }
 staging.finish("run complete");
+// A successful sync removes the temporary directory. Report and classify the
+// persistent artifacts; on a failed sync the retained temporary paths stay valid.
+if (!existsSync(staging.workDir))
+  result = rebaseStagedPaths(result, staging.workDir, args.outputDir);
 
 console.log("\n" + report(`stage breakdown`, [
   ["LLM — draft gen", "llm.generate", 0],
