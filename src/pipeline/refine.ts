@@ -23,6 +23,7 @@ import type { CanonicalRequest, CanonicalPart } from "@harness/template/llm/prot
 import { routeForModel } from "../llm/routes.ts";
 import { longTimeoutFetch } from "../llm/long-timeout-fetch.ts";
 import { resolveModel, DEFAULT_MODEL } from "../config/models.ts";
+import { recordReferenceInputs } from "../tracking/context.ts";
 import { resolveWorkspace } from "../config/workspace.ts";
 import { createSessionState } from "../tools/state.ts";
 import { makeRenderViewsTool } from "../tools/render_views.ts";
@@ -134,6 +135,8 @@ export const DEFAULT_REFINE_STEPS = Number(process.env["PROCEDURA_REFINE_STEPS"]
 
 export async function runRefine(opts: RefineOpts): Promise<RefineResult> {
   const workspace = resolveWorkspace(opts.outputDir);
+  recordReferenceInputs("refinement", workspace.hasImage
+    ? [{ path: workspace.imagePath, role: "primary_image" }] : []);
   const state = createSessionState(
     workspace,
     opts.artifactsSubdir ? { artifactsSubdir: opts.artifactsSubdir } : undefined,

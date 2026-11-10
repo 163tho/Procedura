@@ -1,22 +1,26 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { cpus, totalmem } from "node:os";
-import { join, resolve } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_MODEL, resolveModel } from "../config/models.ts";
 
 export const SOURCE_ROOT = fileURLToPath(new URL("../../", import.meta.url));
+/** Input/source paths are always relative to the Procedura checkout, not run.json. */
+export function sourceRelativePath(path: string): string {
+  return relative(SOURCE_ROOT, resolve(path)).split(sep).join("/") || ".";
+}
 export const hash = (data: string | Uint8Array) => createHash("sha256").update(data).digest("hex");
 export function fileRecord(path: string) {
   if (!existsSync(path) || !statSync(path).isFile()) return null;
   return { path: resolve(path), bytes: statSync(path).size, sha256: hash(readFileSync(path)) };
 }
-function command(argv: string[], cwd = SOURCE_ROOT, trim = true): string | null {
+function command(argv: string[]): string | null {
   try {
-    const result = Bun.spawnSync(argv, { cwd, stdout: "pipe", stderr: "pipe", timeout: 2000 });
+    const result = Bun.spawnSync(argv, { cwd: SOURCE_ROOT, stdout: "pipe", stderr: "pipe", timeout: 2000 });
     if (result.exitCode !== 0) return null;
     const output = result.stdout.toString() || result.stderr.toString();
-    return trim ? output.trim() : output;
+    return output.trim();
   } catch { return null; }
 }
 export function sourceMetadata() {
@@ -27,26 +31,21 @@ export function sourceMetadata() {
     const path = join(SOURCE_ROOT, rel);
     if (existsSync(path) && statSync(path).isFile()) files[rel] = hash(readFileSync(path));
   }
-  const untracked: Record<string, string> = {};
-  for (const rel of command(["git", "ls-files", "-z", "--others", "--exclude-standard", "--", ...scopes])?.split("\0").filter(Boolean) ?? []) {
-    const path = join(SOURCE_ROOT, rel);
-    if (existsSync(path) && statSync(path).isFile()) untracked[rel] = readFileSync(path, "utf8");
-  }
   const status = command(["git", "status", "--porcelain"]);
-  return {
+  const source = {
     commit: command(["git", "rev-parse", "HEAD"]),
     branch: command(["git", "symbolic-ref", "--short", "-q", "HEAD"]),
     dirty: status === null ? null : status.length > 0,
-    status, fingerprint_sha256: hash(JSON.stringify(files)), files,
-    tracked_source_patch: command(["git", "diff", "--binary", "HEAD", "--", ...scopes], SOURCE_ROOT, false),
-    untracked_sources: untracked,
+    fingerprint_sha256: hash(JSON.stringify(files)), file_count: Object.keys(files).length,
   };
+  return source;
 }
+
 export function safeEndpoint(value: string): string | null {
   try { const url = new URL(value); return url.origin + url.pathname; } catch { return null; }
 }
 const allowedOptions = [
-  "text", "inputImage", "incremental", "textOnly", "redo", "maxSteps", "scadModel", "agentModel", "imageModel",
+  "inputImage", "incremental", "textOnly", "redo", "maxSteps", "scadModel", "agentModel", "imageModel",
   "contextRenders", "assembly", "extraRefs", "noPlan", "refine", "exportStl", "paint", "paintModel", "motion",
   "motionModel", "motionPlanPath", "motionAware", "incrementalMotion", "motionOnly", "motionUseLlm", "motionRefine",
   "motionAuthor", "motionFixedBase", "motionCollision", "motionUrdf", "motionValidate", "motionSimRefine",
@@ -63,18 +62,11 @@ const allowedEnvironment = [
   "PROCEDURA_PAINT_CRITIC_SAMPLES", "PROCEDURA_LLM_TIMEOUT_MS", "PROCEDURA_LLM_DEADLINE_MS", "PROCEDURA_LLM_MAX_ATTEMPTS",
   "PROCEDURA_LLM_STREAM_IDLE_MS", "PROCEDURA_IMAGEGEN_ATTEMPTS", "LLM_NO_STREAM_USAGE",
 ];
-export function inputMetadata(output: string, opts: Record<string, any>) {
-  const prompt = opts.text ?? ["effective_text.txt", "prompt.txt", "brief.md"]
-    .map(name => join(output, name)).filter(existsSync).map(path => readFileSync(path, "utf8"))[0] ?? null;
-  return {
-    prompt, prompt_sha256: prompt === null ? null : hash(prompt),
-    image: opts.textOnly ? null : fileRecord(opts.inputImage ?? join(output, "image.png")),
-    motion_plan: opts.motionPlanPath ? fileRecord(opts.motionPlanPath) : null,
-  };
-}
 export function configuration(opts: Record<string, any>) {
   return {
-    requested: Object.fromEntries(allowedOptions.filter(key => opts[key] !== undefined).map(key => [key, opts[key]])),
+    requested: Object.fromEntries(allowedOptions.filter(key => opts[key] !== undefined).map(key => [
+      key, ["inputImage", "motionPlanPath", "pricingFile"].includes(key) ? sourceRelativePath(opts[key]) : opts[key],
+    ])),
     environment_overrides: Object.fromEntries(allowedEnvironment.filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]])),
     effective: {
       incremental: opts.incremental ?? false, text_only: opts.textOnly ?? false, refine: opts.refine !== false,
@@ -115,5 +107,8 @@ export function environmentMetadata() {
 export function outputMetadata(output: string) {
   const names = ["image.png", "prompt.txt", "effective_text.txt", "draft.scad", "draft.obj", "final.scad", "final.obj", "final.stl", "final_summary.txt",
     "plan.json", "parts_summary.json", "final_materials.json", "final_painted.obj", "motion/motion_plan.json"];
-  return Object.fromEntries(names.filter(name => existsSync(join(output, name))).map(name => [name, fileRecord(join(output, name))]));
+  return Object.fromEntries(names.filter(name => existsSync(join(output, name))).map(name => {
+    const record = fileRecord(join(output, name));
+    return [name, record ? { ...record, path: name } : null];
+  }));
 }

@@ -40,6 +40,7 @@ import type {
 } from "@harness/template/llm/protocol";
 
 import { routeForModel } from "../llm/routes.ts";
+import { recordReferenceInputs } from "../tracking/context.ts";
 import { longTimeoutFetch } from "../llm/long-timeout-fetch.ts";
 import { splitThinkTags } from "../llm/think-tags.ts";
 import { resolveModel, DEFAULT_MODEL } from "../config/models.ts";
@@ -264,6 +265,10 @@ export async function runDraft(opts: DraftOpts): Promise<DraftResult> {
       // Record the user message in the session store so trajectory replay
       // can reconstruct exactly what the model was asked.
       const imageB64 = readFileSync(imagePath).toString("base64");
+      recordReferenceInputs("part_generation", [{
+        path: imagePath, role: "primary_image", sourcePath: opts.inputImage ?? null,
+        origin: opts.inputImage ? "supplied" : "generated",
+      }]);
       const userContent: CanonicalPart[] = [
         { kind: "text", text: userText },
         { kind: "text", text: "Isometric render of the object:" },

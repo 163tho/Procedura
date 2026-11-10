@@ -52,6 +52,8 @@ import { resolveModel, DEFAULT_MODEL } from "../config/models.ts";
 import {
   generateImage, resolveImageModel, imageGenAvailable, imageGenDisabledReason,
 } from "../imagegen/images.ts";
+import { recordReferenceInputs } from "../tracking/context.ts";
+import type { ReferenceInput } from "../tracking/inputs.ts";
 import { loadImageBase64 } from "../imagegen/resize.ts";
 import { extractOpenscadCode } from "../scad/extract.ts";
 import { compileScad } from "../scad/compile.ts";
@@ -2316,8 +2318,11 @@ export async function runIncrementalDraft(
     }
     const extraRefs = canGenExtras ? wantExtraRefs : 0;
     if (!textOnly && refImageSize > 0) log(`[inc-draft] reference images normalized to ${refImageSize}px longest-side`);
-    const refImages: { label: string; b64: string }[] = textOnly ? [] : [
-      { label: "primary", b64: loadImageBase64(imagePath, refImageSize) },
+    const refImages: { label: string; b64: string; reference: ReferenceInput }[] = textOnly ? [] : [
+      { label: "primary", b64: loadImageBase64(imagePath, refImageSize), reference: {
+        path: imagePath, role: "primary_image", sourcePath: opts.inputImage ?? null,
+        origin: opts.inputImage ? "supplied" : "generated",
+      } },
     ];
     for (let k = 0; k < extraRefs; k++) {
       if (opts.signal?.aborted) break;
@@ -2326,7 +2331,10 @@ export async function runIncrementalDraft(
       try {
         log(`[inc-draft] multi-ref: generating extra ref ${k + 2} — ${viewPhrase}`);
         await genImage(buildExtraRefPrompt(text, viewPhrase), refPath);
-        refImages.push({ label: viewPhrase, b64: loadImageBase64(refPath, refImageSize) });
+        refImages.push({ label: viewPhrase, b64: loadImageBase64(refPath, refImageSize), reference: {
+          path: refPath, role: "auxiliary_image", sourcePath: null, origin: "generated",
+          provenance: "generated_alternate_view",
+        } });
       } catch (e) {
         log(`[inc-draft] extra ref ${k + 2} gen failed: ${(e as Error).message} — skipping`);
       }
@@ -2339,7 +2347,8 @@ export async function runIncrementalDraft(
     // Attach the full reference set under `header`. With a single ref the format
     // is unchanged; with several, the primary is flagged authoritative and the
     // generated alternates as supplementary viewpoints.
-    const refParts = (header: string): CanonicalPart[] => {
+    const refParts = (header: string, stage: string): CanonicalPart[] => {
+      recordReferenceInputs(stage, refImages.map(image => image.reference));
       // Text-only: say plainly that there is no image rather than attaching
       // none silently. A prompt whose body says "match the reference" with no
       // reference attached invites the model to invent one and describe it.
@@ -2415,7 +2424,7 @@ export async function runIncrementalDraft(
           "Produce the ordered JSON build plan now. Return ONLY the JSON array.";
         const { rawText, reasoning } = await llmGenerate(planSystem, [
           { kind: "text", text: planUserText },
-          ...refParts("Reference image"),
+          ...refParts("Reference image", "planning"),
         ], "draft.plan");
         writeFileSync(join(outDir, "plan_response.txt"), rawText, "utf8");
         if (reasoning.trim()) writeFileSync(join(outDir, "plan_thinking.txt"), reasoning, "utf8");
@@ -2482,7 +2491,7 @@ export async function runIncrementalDraft(
               `=== CURRENT PLAN (${plan.length} parts) ===\n${planText}\n\n` +
               "Return ONLY the JSON object {ok, notes, plan}.",
           },
-          ...refParts("Reference image (whole object)"),
+          ...refParts("Reference image (whole object)", "plan_review"),
         ];
         let rawText = ""; let reasoning = "";
         try {
@@ -2630,7 +2639,7 @@ export async function runIncrementalDraft(
               (parseErr ? `Your previous reply could not be parsed (${parseErr}). ` : "") +
               "Return ONLY the JSON object.",
           },
-          ...refParts("Reference image (whole object)"),
+          ...refParts("Reference image (whole object)", "next_part_selection"),
         ];
         if (views.length > 0) {
           userParts.push({
@@ -2841,7 +2850,7 @@ export async function runIncrementalDraft(
             "Return ONLY the block (same format).";
         }
         userParts.push({ kind: "text", text: userText });
-        userParts.push(...refParts("Reference image (whole object)"));
+        userParts.push(...refParts("Reference image (whole object)", "part_generation"));
         // Image budget: the provider caps a message at 16 images. Reserve slots
         // for the reference set, then attach as many build views as still fit.
         const viewBudget = Math.max(0, 16 - refImages.length);

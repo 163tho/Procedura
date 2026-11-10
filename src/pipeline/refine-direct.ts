@@ -44,6 +44,7 @@ import { basename } from "node:path";
 
 import type { CanonicalPart } from "@harness/template/llm/protocol";
 
+import { recordReferenceInputs } from "../tracking/context.ts";
 import { resolveWorkspace } from "../config/workspace.ts";
 import { resolveModel, DEFAULT_MODEL } from "../config/models.ts";
 import type { ModelRef } from "@harness/template/types";
@@ -240,6 +241,8 @@ async function measureModules(
 
 export async function runDirectRefine(opts: RefineOpts): Promise<RefineResult> {
   const workspace = resolveWorkspace(opts.outputDir);
+  recordReferenceInputs("refinement", workspace.hasImage
+    ? [{ path: workspace.imagePath, role: "primary_image" }] : []);
   const state = createSessionState(
     workspace,
     opts.artifactsSubdir ? { artifactsSubdir: opts.artifactsSubdir } : undefined,

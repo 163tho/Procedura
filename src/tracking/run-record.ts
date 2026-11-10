@@ -3,9 +3,10 @@ import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSyn
 import { hostname } from "node:os";
 import { join, resolve } from "node:path";
 import { inRun, trackingContext, type TrackingSink } from "./context.ts";
-import { configuration, environmentMetadata, inputMetadata, outputMetadata, sourceMetadata } from "./metadata.ts";
+import { configuration, environmentMetadata, outputMetadata, sourceMetadata, sourceRelativePath } from "./metadata.ts";
 import { loadPricing, type Pricing } from "./pricing.ts";
-import type { Usage } from "./usage.ts";
+import { recoverAccounting, summarizeCalls } from "./accounting.ts";
+import { InputTracker, type ReferenceInput } from "./inputs.ts";
 
 type Data = Record<string, any>;
 const now = () => new Date().toISOString();
@@ -22,50 +23,6 @@ function readLedger(path: string): { calls: Map<string, Data>; malformed: number
   }
   return { calls, malformed };
 }
-export function summarizeCalls(calls: Data[]) {
-  const known = calls.filter(call => call.usage_status === "complete");
-  const sums = (key: keyof Usage) => known.reduce((total, call) => total + (Number(call.usage?.[key]) || 0), 0);
-  const costs = calls.filter(call => typeof call.cost?.estimated_usd === "number");
-  const knownCost = costs.reduce((total, call) => total + call.cost.estimated_usd, 0);
-  return {
-    calls: calls.length, completed_calls: calls.filter(call => call.status === "completed").length,
-    failed_calls: calls.filter(call => ["failed", "interrupted", "cancelled"].includes(call.status)).length,
-    usage_complete_calls: known.length, usage_incomplete_calls: calls.length - known.length,
-    tokens: {
-      reported_input_tokens: sums("input_tokens"), reported_output_tokens: sums("output_tokens"),
-      reported_total_tokens: sums("input_tokens") + sums("output_tokens"),
-      // Reasoning is a subset of output. Cache is a subset of total input.
-      reported_reasoning_tokens: sums("reasoning_tokens"), reported_cache_read_tokens: sums("cache_read_input_tokens"),
-      complete: known.length === calls.length,
-    },
-    cost: {
-      currency: "USD", known_estimated_usd: knownCost,
-      estimated_usd: costs.length === calls.length ? knownCost : null,
-      priced_calls: costs.length, unpriced_calls: calls.length - costs.length,
-      billed_usd: null, note: "Local estimates, not an invoice or remaining credit balance.",
-    },
-    api_request_duration_ms_sum: calls.reduce((total, call) => total + (call.duration_ms ?? 0), 0),
-    by_stage: breakdown(calls, "stage"),
-    by_model: breakdown(calls, "model"),
-
-  };
-}
-
-function breakdown(calls: Data[], dimension: string) {
-  return Object.fromEntries([...new Set(calls.map(call => String(call[dimension] ?? call.requested_model ?? "unknown")))].map(value => {
-    const matching = calls.filter(call => String(call[dimension] ?? call.requested_model ?? "unknown") === value);
-    const reported = matching.filter(call => call.usage_status === "complete");
-    const priced = matching.filter(call => typeof call.cost?.estimated_usd === "number");
-    const cost = priced.reduce((n, call) => n + call.cost.estimated_usd, 0);
-    return [value, {
-      calls: matching.length, usage_complete: reported.length === matching.length,
-      input_tokens: reported.reduce((n, call) => n + (call.usage.input_tokens ?? 0), 0),
-      output_tokens: reported.reduce((n, call) => n + (call.usage.output_tokens ?? 0), 0),
-      known_estimated_usd: cost, estimated_usd: priced.length === matching.length ? cost : null,
-    }];
-  }));
-}
-
 const activeRecorders = new Set<RunRecorder>();
 function onInterrupt() {
   for (const recorder of [...activeRecorders]) recorder.finish("aborted", null, "Interrupted by SIGINT.");
@@ -89,6 +46,7 @@ export class RunRecorder implements TrackingSink {
   private start = performance.now();
   private finished = false;
   private artifactDirectory: string;
+  private inputTracker: InputTracker;
   private exitHandler = () => this.finish("interrupted", null, "Process exited before pipeline finalization.");
 
   constructor(outputDir: string, opts: Data) {
@@ -102,10 +60,10 @@ export class RunRecorder implements TrackingSink {
     this.acquireLock();
     try {
       this.summary = existsSync(this.summaryPath) ? JSON.parse(readFileSync(this.summaryPath, "utf8"))
-        : { schema_version: 1, run_id: randomUUID(), created_at: now(), attempts: [],
+        : { schema_version: 3, run_id: randomUUID(), created_at: now(), attempts: [],
           prior_untracked_work: ["draft.scad", "plan.json", "final.scad"].some(name => existsSync(join(this.artifactDirectory, name))),
           history_scope: "Recorded invocations only; costs and timing of earlier untracked work are not reconstructed." };
-      if (this.summary.schema_version !== 1 || !Array.isArray(this.summary.attempts))
+      if (![1, 2, 3].includes(this.summary.schema_version) || !Array.isArray(this.summary.attempts))
         throw new Error("Unsupported run.json schema; preserve it and use a new output directory.");
       const journal = readLedger(this.ledgerPath);
       this.calls = journal.calls;
@@ -123,20 +81,35 @@ export class RunRecorder implements TrackingSink {
       for (const call of this.calls.values()) if (call.status === "started") {
         call.status = "interrupted"; call.usage_status = "unknown";
       }
+      const previousVersion = this.summary.schema_version;
+      for (const previous of this.summary.attempts) {
+        previous.api = recoverAccounting(previous, [...this.calls.values()].filter(call => call.attempt_id === previous.attempt_id));
+        if (previousVersion < 3) previous.recorded_schema_version = previous.schema_version ?? previousVersion;
+        delete previous.usage;
+        delete previous.schema_version;
+      }
+      // Schema 3 displays newest first; use the ID rather than the old array order.
+      const previousAttempt = this.summary.attempts.find((attempt: Data) => attempt.attempt_id === this.summary.latest_attempt_id)
+        ?? (previousVersion < 3 ? this.summary.attempts.at(-1) : this.summary.attempts[0]);
+      if (previousAttempt) this.summary.latest_attempt_id = previousAttempt.attempt_id;
+      if (previousVersion < 3) this.summary.attempts.reverse();
+      this.inputTracker = new InputTracker(this.artifactDirectory, opts, previousAttempt);
       this.attempt = {
         attempt_id: this.attemptId, previous_attempt_id: this.summary.latest_attempt_id ?? null,
         mode: opts.redo ? "redo" : opts.motionOnly ? "motion-only"
           : existsSync(join(this.directory, "draft.scad")) || existsSync(join(this.directory, "plan.json")) ? "resume-or-reuse" : "new",
         experiment: { name: opts.experimentName ?? null, dataset_id: opts.datasetId ?? null, repetition: opts.repetition ?? null },
+        input_summary: this.inputTracker.summary,
         started_at: now(), ended_at: null, status: "running", duration_ms: null,
-        source: sourceMetadata(), inputs: inputMetadata(this.artifactDirectory, opts), configuration: configuration(opts),
+        api: summarizeCalls([]),
+        source: sourceMetadata(), inputs: this.inputTracker.inputs, configuration: configuration(opts),
         environment: environmentMetadata(), pricing: this.pricing, phases: {},
         timings: { stages: {}, retry_wait_ms: 0, note: "API times include network/queue/generation. Nested and concurrent times overlap; do not sum them into wall time." },
         input_artifacts: this.artifacts(), output_artifacts: null, outcome: null, error: null,
       };
-      this.summary.attempts.push(this.attempt);
+      this.summary.attempts.unshift(this.attempt);
       this.summary.latest_attempt_id = this.attemptId;
-      this.summary.output_directory = this.directory;
+      this.summary.output_directory = sourceRelativePath(this.directory);
       this.flush();
       process.once("exit", this.exitHandler);
       if (activeRecorders.size === 0) {
@@ -164,21 +137,31 @@ export class RunRecorder implements TrackingSink {
   }
   private flush(): void {
     if (this.finished) return;
-    for (const attempt of this.summary.attempts)
-      attempt.usage = summarizeCalls([...this.calls.values()].filter(call => call.attempt_id === attempt.attempt_id));
-    this.summary.totals = summarizeCalls([...this.calls.values()]);
-    this.summary.status = this.attempt.status;
+    this.attempt.inputs = this.inputTracker.inputs;
+    this.attempt.input_summary = this.inputTracker.summary;
+    this.attempt.api = summarizeCalls([...this.calls.values()].filter(call => call.attempt_id === this.attemptId));
     this.summary.updated_at = now();
+    const { schema_version: _schema, summary: _overview, totals: _totals, status: _status, attempts, ...metadata } = this.summary;
+    this.summary = {
+      schema_version: 3,
+      input_paths_relative_to: "procedura_repository_root",
+      ...metadata,
+      api_calls_file: "api_calls.jsonl",
+      attempts,
+    };
     const temporary = this.summaryPath + "." + this.attemptId + ".tmp";
     writeFileSync(temporary, JSON.stringify(this.summary, null, 2) + "\n");
     renameSync(temporary, this.summaryPath);
   }
   private artifacts() {
-    const artifacts = outputMetadata(this.artifactDirectory);
-    for (const [name, record] of Object.entries(artifacts)) if (record) record.path = join(this.directory, name);
-    return artifacts;
+    return outputMetadata(this.artifactDirectory);
+  }
+  recordReferences(stage: string, references: readonly ReferenceInput[]): void {
+    this.inputTracker.record(stage, references);
+    this.flush();
   }
   skipPhase(name: string, reason: string): void {
+    this.inputTracker.skipped(name);
     this.attempt.phases[name] = { status: "skipped", reason, duration_ms: 0 };
     this.flush();
   }
