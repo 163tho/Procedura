@@ -55,6 +55,8 @@ import {
 import { recordReferenceInputs } from "../tracking/context.ts";
 import type { ReferenceInput } from "../tracking/inputs.ts";
 import { loadImageBase64 } from "../imagegen/resize.ts";
+import { DRAFT_IMAGE_BUDGET, snapshotAuxiliaryReferences } from "./auxiliary-references.ts";
+import type { AuxiliaryReference } from "./auxiliary-references.ts";
 import { extractOpenscadCode } from "../scad/extract.ts";
 import { compileScad } from "../scad/compile.ts";
 import { timeStage, addStage } from "./stage-timer.ts";
@@ -400,6 +402,8 @@ export interface IncrementalDraftOpts {
   /** When set, skip image-gen and use this image file as the reference (copied
    * to <outputDir>/image.png). Mirrors runDraft's `inputImage`. */
   inputImage?: string;
+  /** Hunyuan mesh renders for incremental part generation only; excluded from planning and refinement. */
+  auxiliaryReferences?: AuxiliaryReference[];
   /**
    * Text-only mode: generate from the prompt with NO reference image at all.
    *
@@ -2279,6 +2283,9 @@ export async function runIncrementalDraft(
 
   try {
     // ── Stage A: image (provided input, generated, or skipped entirely) ──
+    const auxiliaryReferences = snapshotAuxiliaryReferences(outDir, opts.auxiliaryReferences, Boolean(opts.resume));
+    if (auxiliaryReferences.length && textOnly)
+      throw new Error("Auxiliary references cannot be used in a text-only run.");
     if (textOnly) {
       // Nothing to do. Saying so explicitly matters because every later stage
       // reads the ABSENCE of image.png as the mode switch, and a silent skip
@@ -2317,13 +2324,37 @@ export async function runIncrementalDraft(
           `(set PROCEDURA_IMAGE_MODEL to enable extra reference views)`);
     }
     const extraRefs = canGenExtras ? wantExtraRefs : 0;
+    if (1 + auxiliaryReferences.length + extraRefs > DRAFT_IMAGE_BUDGET)
+      throw new Error("Primary, auxiliary, and generated references exceed the 16-image draft budget.");
     if (!textOnly && refImageSize > 0) log(`[inc-draft] reference images normalized to ${refImageSize}px longest-side`);
-    const refImages: { label: string; b64: string; reference: ReferenceInput }[] = textOnly ? [] : [
+    // Planning only sees the original image. Additional views are reserved for
+    // per-part generation (including retries), never decomposition or review.
+    type ReferenceImage = {
+      label: string;
+      b64: string;
+      reference: ReferenceInput;
+      hunyuanMesh?: boolean;
+      camera?: Record<string, unknown>;
+    };
+    const primaryRefImages: ReferenceImage[] = textOnly ? [] : [
       { label: "primary", b64: loadImageBase64(imagePath, refImageSize), reference: {
         path: imagePath, role: "primary_image", sourcePath: opts.inputImage ?? null,
         origin: opts.inputImage ? "supplied" : "generated",
       } },
     ];
+    const refImages = [...primaryRefImages];
+    for (const reference of auxiliaryReferences) {
+      refImages.push({
+        label: "auxiliary mesh view: " + reference.label,
+        hunyuanMesh: true,
+        b64: loadImageBase64(reference.path, refImageSize),
+        reference: {
+          path: reference.path, role: "auxiliary_image", sourcePath: reference.sourcePath,
+          origin: "supplied", provenance: "hunyuan_mesh_render",
+        },
+        ...(reference.camera ? { camera: reference.camera } : {}),
+      });
+    }
     for (let k = 0; k < extraRefs; k++) {
       if (opts.signal?.aborted) break;
       const refPath = join(outDir, `image_ref${k + 2}.png`);
@@ -2339,20 +2370,20 @@ export async function runIncrementalDraft(
         log(`[inc-draft] extra ref ${k + 2} gen failed: ${(e as Error).message} — skipping`);
       }
     }
-    if (extraRefs > 0) {
-      log(`[inc-draft] multi-ref: attaching ${refImages.length} reference image(s) to plan + gen calls`);
-      emit("draft.multiref.ready", { refCount: refImages.length });
+    if (extraRefs > 0 || auxiliaryReferences.length > 0) {
+      log(`[inc-draft] multi-ref: ${primaryRefImages.length} original reference for planning; ` +
+          `${refImages.length} reference image(s) for per-part generation only`);
+      emit("draft.multiref.ready", { refCount: refImages.length, planRefCount: primaryRefImages.length });
     }
 
-    // Attach the full reference set under `header`. With a single ref the format
-    // is unchanged; with several, the primary is flagged authoritative and the
-    // generated alternates as supplementary viewpoints.
-    const refParts = (header: string, stage: string): CanonicalPart[] => {
-      recordReferenceInputs(stage, refImages.map(image => image.reference));
+    // Track the exact reference set selected for each stage; auxiliary images
+    // and their captions remain outside planning requests.
+    const refParts = (header: string, references: readonly ReferenceImage[], stage: string): CanonicalPart[] => {
+      recordReferenceInputs(stage, references.map(image => image.reference));
       // Text-only: say plainly that there is no image rather than attaching
       // none silently. A prompt whose body says "match the reference" with no
       // reference attached invites the model to invent one and describe it.
-      if (refImages.length === 0) {
+      if (references.length === 0) {
         return [{
           kind: "text",
           text: "There is NO reference image for this object — the text description " +
@@ -2362,22 +2393,31 @@ export async function runIncrementalDraft(
                 "committed.",
         }];
       }
-      if (refImages.length === 1) {
+      if (references.length === 1) {
         return [
           { kind: "text", text: `${header}:` },
-          { kind: "image", data: refImages[0]!.b64, mimeType: "image/png" },
+          { kind: "image", data: references[0]!.b64, mimeType: "image/png" },
         ];
       }
       const parts: CanonicalPart[] = [{
         kind: "text",
-        text: `${header} — ${refImages.length} views. View 1 is the PRIMARY, ` +
-          `authoritative reference (match it); the others are generated alternate ` +
-          `viewpoints for extra shape context:`,
+        text: `${header} — ${references.length} views. View 1 is the original PRIMARY, ` +
+          `authoritative reference. Always follow the original reference image for visible areas. ` +
+          `Use generated alternate viewpoints only for uncertain or occluded areas. ` +
+          (references.some(reference => reference.hunyuanMesh)
+            ? `Images labeled auxiliary mesh view are renders of a Hunyuan mesh generated from ` +
+              `the original reference image. They are approximate inferences, not independent ` +
+              `observations, and must never override visible evidence in the original image.`
+            : ""),
       }];
-      refImages.forEach((r, idx) => {
+      references.forEach((r, idx) => {
         parts.push({
           kind: "text",
           text: idx === 0 ? `view ${idx + 1} (primary):` : `view ${idx + 1} (${r.label}):`,
+        });
+        if (r.camera) parts.push({
+          kind: "text",
+          text: "Camera metadata in the SOURCE MESH frame (map to Procedura axes; dimensions are approximate):\n" + JSON.stringify(r.camera),
         });
         parts.push({ kind: "image", data: r.b64, mimeType: "image/png" });
       });
@@ -2424,7 +2464,7 @@ export async function runIncrementalDraft(
           "Produce the ordered JSON build plan now. Return ONLY the JSON array.";
         const { rawText, reasoning } = await llmGenerate(planSystem, [
           { kind: "text", text: planUserText },
-          ...refParts("Reference image", "planning"),
+          ...refParts("Reference image", primaryRefImages, "planning"),
         ], "draft.plan");
         writeFileSync(join(outDir, "plan_response.txt"), rawText, "utf8");
         if (reasoning.trim()) writeFileSync(join(outDir, "plan_thinking.txt"), reasoning, "utf8");
@@ -2483,7 +2523,7 @@ export async function runIncrementalDraft(
             text:
               (textOnly
                 ? "Review this build plan against the text description. "
-                : "Review this build plan against the reference image and text. ") + +
+                : "Review this build plan against the reference image and text. ") +
               "ADD-AND-SHARPEN ONLY: add genuinely missing parts and sharpen vague " +
               "descriptions — never merge, remove, rename, or reorder the planned " +
               "parts, and keep the planner's left/right assignments.\n\n" +
@@ -2491,7 +2531,7 @@ export async function runIncrementalDraft(
               `=== CURRENT PLAN (${plan.length} parts) ===\n${planText}\n\n` +
               "Return ONLY the JSON object {ok, notes, plan}.",
           },
-          ...refParts("Reference image (whole object)", "plan_review"),
+          ...refParts("Reference image (whole object)", primaryRefImages, "plan_review"),
         ];
         let rawText = ""; let reasoning = "";
         try {
@@ -2639,14 +2679,15 @@ export async function runIncrementalDraft(
               (parseErr ? `Your previous reply could not be parsed (${parseErr}). ` : "") +
               "Return ONLY the JSON object.",
           },
-          ...refParts("Reference image (whole object)", "next_part_selection"),
+          ...refParts("Reference image (whole object)", primaryRefImages, "next_part_selection"),
         ];
-        if (views.length > 0) {
+        const attachViews = views.slice(0, Math.max(0, DRAFT_IMAGE_BUDGET - primaryRefImages.length));
+        if (attachViews.length > 0) {
           userParts.push({
             kind: "text",
             text: "The MODEL BUILT SO FAR (parts-coloured renders of what exists right now):",
           });
-          for (const v of views) {
+          for (const v of attachViews) {
             userParts.push({ kind: "text", text: `${v.view}:` });
             userParts.push({ kind: "image", data: v.b64, mimeType: "image/png" });
           }
@@ -2850,10 +2891,8 @@ export async function runIncrementalDraft(
             "Return ONLY the block (same format).";
         }
         userParts.push({ kind: "text", text: userText });
-        userParts.push(...refParts("Reference image (whole object)", "part_generation"));
-        // Image budget: the provider caps a message at 16 images. Reserve slots
-        // for the reference set, then attach as many build views as still fit.
-        const viewBudget = Math.max(0, 16 - refImages.length);
+        userParts.push(...refParts("Reference image (whole object)", refImages, "part_generation"));
+        const viewBudget = Math.max(0, DRAFT_IMAGE_BUDGET - refImages.length);
         const attachViews = buildViews.slice(0, viewBudget);
         if (attachViews.length) {
           userParts.push({

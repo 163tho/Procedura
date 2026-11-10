@@ -96,6 +96,12 @@ It reuses `OPENAI_BASE_URL` / `OPENAI_API_KEY`, so nothing else needs setting.
 Every run saves `run.json` and `api_calls.jsonl` in its output directory. See
 [run tracking](run-tracking.md) for experiment labels, cost estimates and history.
 
+For Hunyuan mesh renders, use `--aux-views-dir DIR` or repeat `--aux-image PNG`
+alongside the original `--image`. These views guide only uncertain or hidden areas
+during incremental part generation; planning and refinement use the original
+reference without auxiliary guidance. See the
+[multi-view input guide](multiview.md) for camera selection and image budgets.
+
 ### The default run
 
 Nothing to configure past the endpoint. Plans the parts, builds them one at a

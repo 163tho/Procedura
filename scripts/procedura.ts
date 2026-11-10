@@ -15,6 +15,8 @@ import { beginStaging, rebaseStagedPaths } from "../src/pipeline/local-staging.t
 import { runProcedura } from "../src/pipeline/procedura.ts";
 import { imageGenAvailable, imageGenDisabledReason } from "../src/imagegen/images.ts";
 import type { MotionCollisionApproximation } from "../src/motion/types.ts";
+import { resolveAuxiliaryReferences } from "../src/pipeline/auxiliary-references.ts";
+import type { AuxiliaryReference } from "../src/pipeline/auxiliary-references.ts";
 
 interface Args {
   outputDir: string;
@@ -29,6 +31,9 @@ interface Args {
   datasetId?: string;
   repetition?: number;
   pricingFile?: string;
+  auxImages: string[];
+  auxViewsDir?: string;
+  auxiliaryReferences?: AuxiliaryReference[];
   noImage: boolean;
   redo: boolean;
   oneShot: boolean;
@@ -62,7 +67,7 @@ function parseArgs(argv: string[]): Args {
   // incremental is the DEFAULT draft mode — --one-shot opts out. The one-shot
   // path emits the whole model in a single call and has no plan stage.
   const args: Args = { outputDir: "", noImage: false, redo: false, oneShot: false,
-    incremental: true, contextRenders: false, assembly: false, noRefine: false,
+    incremental: true, contextRenders: false, assembly: false, noRefine: false, auxImages: [],
     exportStl: false, paint: false, motion: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
@@ -88,6 +93,16 @@ function parseArgs(argv: string[]): Args {
     if (a === "--scad-model")                 { args.scadModel = argv[++i]!; continue; }
     if (a === "--image-model")                { args.imageModel = argv[++i]!; continue; }
     if (a === "--image")                      { args.image = argv[++i]!; continue; }
+    if (a === "--aux-image" || a === "--aux-views-dir") {
+      const path = argv[++i];
+      if (!path || path.startsWith("--")) {
+        console.error(a + " requires a path");
+        process.exit(2);
+      }
+      if (a === "--aux-image") args.auxImages.push(path);
+      else args.auxViewsDir = path;
+      continue;
+    }
     if (a === "--no-image")                   { args.noImage = true; continue; }
     if (a === "--redo")                       { args.redo = true; continue; }
     if (a === "--local-staging")              { args.staging = "always"; continue; }
@@ -149,6 +164,18 @@ function parseArgs(argv: string[]): Args {
     console.error(`--3d-feedback requires the part-by-part draft: there are no intermediate builds to render in a one-shot draft`);
     process.exit(2);
   }
+  if (args.auxImages.length || args.auxViewsDir !== undefined) {
+    if (!args.image || args.noImage || !args.incremental || args.motionOnly) {
+      console.error("Auxiliary views require --image and an incremental draft; they cannot be combined with --no-image, --one-shot, or --motion-only.");
+      process.exit(2);
+    }
+    try {
+      args.auxiliaryReferences = resolveAuxiliaryReferences({ images: args.auxImages, viewsDir: args.auxViewsDir });
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : String(error));
+      process.exit(2);
+    }
+  }
   // No reference, and no way to make one. Rather than refuse, run text-only —
   // that is the default configuration, and it is a real mode, not a degraded
   // one. Say so out loud, because a reference changes what the run is doing.
@@ -189,6 +216,12 @@ Options:
   --prompt-file PATH     read prompt from a UTF-8 file
   --image PATH           reconstruct THIS image. Raises fidelity a lot — the
                          best-quality runs all supply one.
+  --aux-image PATH       add a Hunyuan mesh PNG for part generation; repeat to
+                         select particular perspectives. Requires --image.
+  --aux-views-dir DIR    load auxiliary PNG views from a directory (alternative
+                         to --aux-image). Uses cameras.json when present;
+                         excludes contact sheets. Up to 15 auxiliary images.
+                         Planning and refinement use only the primary --image.
   --no-image             TEXT ONLY: no reference image anywhere in the run. This
                          is the DEFAULT when none is supplied and image
                          generation is off; the flag states it explicitly.
@@ -338,6 +371,7 @@ try {
   ...(prompt !== undefined ? { text: prompt } : {}),
   ...(args.maxSteps !== undefined ? { maxSteps: args.maxSteps } : {}),
   ...(args.image !== undefined ? { inputImage: args.image } : {}),
+  ...(args.auxiliaryReferences !== undefined ? { auxiliaryReferences: args.auxiliaryReferences } : {}),
   ...(args.noImage ? { textOnly: true } : {}),
   ...(args.agentModel !== undefined ? { agentModel: args.agentModel } : {}),
   ...(args.scadModel !== undefined ? { scadModel: args.scadModel } : {}),

@@ -37,6 +37,7 @@ import { runPaint, type PaintResult } from "./paint.ts";
 import { runMotionExport, type MotionExportResult } from "./motion.ts";
 import type { MotionCollisionApproximation } from "../motion/types.ts";
 import { renderAOViews } from "../render/ao.ts";
+import type { AuxiliaryReference } from "./auxiliary-references.ts";
 
 export interface RunProceduraOpts {
   /** Free-text prompt. Required unless artifacts already exist in outputDir. */
@@ -53,6 +54,8 @@ export interface RunProceduraOpts {
   /** When set, skip image-gen in the draft phase and use this image file as
    *  the reference (copied to <outputDir>/image.png). SCAD-gen still runs. */
   inputImage?: string;
+  /** Hunyuan mesh renders for incremental part generation only; excluded from planning and refinement. */
+  auxiliaryReferences?: AuxiliaryReference[];
   /** Text-only: generate with NO reference image at all. Skips image-gen in the
    *  draft; refine and paint follow automatically by detecting the absent
    *  image.png. Incremental draft only — `runDraft` still needs an image. */
@@ -233,6 +236,8 @@ export async function runProcedura(opts: RunProceduraOpts): Promise<RunProcedura
 }
 
 async function runProceduraImpl(opts: RunProceduraOpts): Promise<RunProceduraResult> {
+  if (opts.auxiliaryReferences?.length && (!opts.incremental || opts.textOnly || opts.motionOnly || !opts.inputImage))
+    throw new Error("Auxiliary references require an explicit primary inputImage and the incremental draft.");
   const outDir = resolve(opts.outputDir);
   mkdirSync(outDir, { recursive: true });
   mkdirSync(join(outDir, "_trajectory"), { recursive: true });
@@ -330,6 +335,7 @@ async function runProceduraImpl(opts: RunProceduraOpts): Promise<RunProceduraRes
           ...(opts.scadModel !== undefined ? { scadModel: opts.scadModel } : {}),
           ...(opts.imageModel !== undefined ? { imageModel: opts.imageModel } : {}),
           ...(opts.inputImage !== undefined ? { inputImage: opts.inputImage } : {}),
+          ...(opts.auxiliaryReferences !== undefined ? { auxiliaryReferences: opts.auxiliaryReferences } : {}),
           ...(opts.textOnly ? { textOnly: true } : {}),
           ...(opts.contextRenders ? { contextRenders: true } : {}),
           ...(opts.extraRefs !== undefined ? { extraRefs: opts.extraRefs } : {}),

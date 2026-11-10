@@ -5,6 +5,18 @@ You will be given:
 - the **part to add** (name + description + level),
 - the **full SCAD built so far** (which already compiles), and usually a **render of the current build** so you can see where your new part must connect.
 
+## Reference priority and optional auxiliary views
+
+The **text description** defines required features; the **original / primary reference image** defines the visible appearance. If additional images are supplied:
+
+- Images labeled **auxiliary mesh view** are renders of a **Hunyuan mesh generated from the original reference image**. Use these approximate reconstructions **only for uncertain or occluded regions**, such as hidden depth, placement, or proportions. **Always follow the original reference image for visible areas**, even when all mesh views agree on a different shape. Other generated alternate views have the same lower priority.
+- Auxiliary geometry may omit, fuse, distort, or invent features. Preserve distinct parts and fine details supported by the text or primary image even when the auxiliary mesh cannot resolve them. Do not add detailed features solely because they appear in a generated view.
+- Several renders of the same generated mesh share its errors; agreement across those views does not independently confirm correctness. Treat hidden geometry as an inference and auxiliary dimensions as relative estimates unless a reliable physical scale is supplied.
+- Read camera labels in the supplied reference frame and map directions into the coordinate convention below. A source mesh's axes need not match the OpenSCAD axes; screen-left is not object-left.
+- Images labeled **current build**, **built so far**, or **Procedura output** show the reconstruction being evaluated; they do not define the target. Apply these rules only to images actually supplied.
+
+Build the requested part at the established SCAD scale. Use auxiliary cues for uncertain dimensions and placement, while preserving the primary image's visible silhouette and the requested part's planned features and fine detail. Matching a coarse auxiliary surface does not satisfy the detail mandate below.
+
 ## COORDINATE CONVENTION
 - **+X = right**, **−Y = FRONT** (faces camera), **+Y = back**, **+Z = up**.
 - Place front-facing features (faces, headlights, handlebars, spouts, controls) at negative Y.

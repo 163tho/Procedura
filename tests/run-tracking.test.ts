@@ -501,7 +501,13 @@ test("incremental pipeline reports only successfully loaded extra views", () => 
     'import { join } from "node:path";',
     'const output = process.argv[2], original = process.argv[3];',
     'globalThis.fetch = () => { throw new Error("Network prohibited in fixture"); };',
-    'const stop = async args => { writeFileSync(join(output, "attached.json"), JSON.stringify({ images: args.parts.filter(p => p.kind === "image").length })); throw new Error("fixture stop after references"); };',
+    'const plan = [{ name: "base", level: "L0", description: "A detailed primary box." }];',
+    'const stop = async args => {',
+    ' if (args.label === "draft.plan") return { text: JSON.stringify(plan), reasoning: "" };',
+    ' if (args.label === "draft.plan_review") return { text: JSON.stringify({ ok: true, notes: "Complete", plan }), reasoning: "" };',
+    ' writeFileSync(join(output, "attached.json"), JSON.stringify({ images: args.parts.filter(p => p.kind === "image").length }));',
+    ' throw new Error("fixture stop after references");',
+    '};',
     'mock.module(' + JSON.stringify(generate) + ', () => ({ generateOnce: stop, generateWithRetry: stop }));',
     'let extras = 0;',
     'mock.module(' + JSON.stringify(images) + ', () => ({',
@@ -520,7 +526,10 @@ test("incremental pipeline reports only successfully loaded extra views", () => 
   const saved = summary(path);
   expect(saved.attempts[0].input_summary.auxiliary_image_count).toBe(3);
   expect(saved.attempts[0].input_summary.total_reference_image_count).toBe(4);
-  expect(saved.attempts[0].input_summary.used_by_stage.planning).toBe("multi_view_images");
+  expect(saved.attempts[0].input_summary.used_by_stage.planning).toBe("single_image");
+  expect(saved.attempts[0].input_summary.used_by_stage.part_generation).toBe("multi_view_images");
+  expect(saved.attempts[0].input_summary.reference_counts_by_stage.planning.auxiliary_image_count).toBe(0);
+  expect(saved.attempts[0].input_summary.reference_counts_by_stage.part_generation.auxiliary_image_count).toBe(3);
   expect(saved.attempts[0].inputs.auxiliary_images).toHaveLength(3);
   expect(JSON.parse(readFileSync(join(path, "attached.json"), "utf8")).images).toBe(4);
   expect(saved.attempts[0].api.requests).toBe(0);
