@@ -90,7 +90,8 @@ function toGeminiPart(
     case "image":
       return { inlineData: { mimeType: p.mimeType, data: p.data } };
     case "tool-call":
-      return { functionCall: { name: p.toolName, args: p.input ?? {} } };
+      return { functionCall: { name: p.toolName, args: p.input ?? {} },
+        ...(p.thoughtSignature ? { thoughtSignature: p.thoughtSignature } : {}) };
     case "tool-result": {
       // functionResponse.response must be a JSON object (Struct). Wrap scalars.
       const response: JsonObject =
@@ -197,7 +198,7 @@ export const GoogleGenAI: Protocol<Raw> = {
     if (!raw.data || raw.data === "[DONE]") return [];
     let chunk: {
       candidates?: {
-        content?: { parts?: { text?: string; thought?: boolean; functionCall?: { name?: string; args?: JsonObject } }[] };
+        content?: { parts?: { text?: string; thought?: boolean; thoughtSignature?: string; functionCall?: { name?: string; args?: JsonObject } }[] };
         finishReason?: string;
       }[];
       usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number; thoughtsTokenCount?: number };
@@ -226,7 +227,8 @@ export const GoogleGenAI: Protocol<Raw> = {
       if (part.functionCall?.name) {
         sawFunctionCall = true;
         const callId = `gm_call_${++functionCallCounter}`;
-        out.push({ kind: "tool-call-start", toolCallId: callId, toolName: part.functionCall.name });
+        out.push({ kind: "tool-call-start", toolCallId: callId, toolName: part.functionCall.name,
+          ...(part.thoughtSignature ? { thoughtSignature: part.thoughtSignature } : {}) });
         out.push({ kind: "tool-call-delta", toolCallId: callId, argDelta: JSON.stringify(part.functionCall.args ?? {}) });
       } else if (part.thought === true && part.text) {
         out.push({ kind: "thinking-delta", text: part.text });

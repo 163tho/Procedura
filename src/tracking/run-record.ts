@@ -6,6 +6,7 @@ import { inRun, trackingContext, type TrackingSink } from "./context.ts";
 import { configuration, environmentMetadata, inputMetadata, outputMetadata, sourceMetadata } from "./metadata.ts";
 import { loadPricing, type Pricing } from "./pricing.ts";
 import type { Usage } from "./usage.ts";
+import { InputTracker, type ReferenceInput } from "./inputs.ts";
 
 type Data = Record<string, any>;
 const now = () => new Date().toISOString();
@@ -89,6 +90,7 @@ export class RunRecorder implements TrackingSink {
   private start = performance.now();
   private finished = false;
   private artifactDirectory: string;
+  private inputTracker: InputTracker;
   private exitHandler = () => this.finish("interrupted", null, "Process exited before pipeline finalization.");
 
   constructor(outputDir: string, opts: Data) {
@@ -119,10 +121,16 @@ export class RunRecorder implements TrackingSink {
       for (const previous of this.summary.attempts) if (previous.status === "running") {
         previous.status = "interrupted";
         previous.error = "Previous invocation ended without finalization; its completed calls are retained.";
+        if (previous.mesh_guidance) {
+          for (const request of previous.mesh_guidance.requests) if (request.status === "started") request.status = "interrupted";
+          previous.mesh_guidance.failed_renders = previous.mesh_guidance.requests.filter((request: Data) =>
+            ["failed", "aborted", "interrupted"].includes(request.status)).length;
+        }
       }
       for (const call of this.calls.values()) if (call.status === "started") {
         call.status = "interrupted"; call.usage_status = "unknown";
       }
+      this.inputTracker = new InputTracker(this.artifactDirectory, opts, this.summary.attempts.at(-1));
       this.attempt = {
         attempt_id: this.attemptId, previous_attempt_id: this.summary.latest_attempt_id ?? null,
         mode: opts.redo ? "redo" : opts.motionOnly ? "motion-only"
@@ -164,6 +172,8 @@ export class RunRecorder implements TrackingSink {
   }
   private flush(): void {
     if (this.finished) return;
+    this.attempt.inputs = { ...this.attempt.inputs, ...this.inputTracker.inputs };
+    this.attempt.input_summary = this.inputTracker.summary;
     for (const attempt of this.summary.attempts)
       attempt.usage = summarizeCalls([...this.calls.values()].filter(call => call.attempt_id === attempt.attempt_id));
     this.summary.totals = summarizeCalls([...this.calls.values()]);
@@ -179,7 +189,36 @@ export class RunRecorder implements TrackingSink {
     return artifacts;
   }
   skipPhase(name: string, reason: string): void {
+    this.inputTracker.skipped(name);
     this.attempt.phases[name] = { status: "skipped", reason, duration_ms: 0 };
+    this.flush();
+  }
+  recordReferences(stage: string, references: readonly ReferenceInput[]): void {
+    this.inputTracker.record(stage, references);
+    this.flush();
+  }
+  recordMeshGuidance(details: Data): void {
+    const guidance = this.attempt.mesh_guidance ??= {
+      mode: "on_demand_views", initialization: false, usage: "uncertainty_only",
+      available_by_stage: {}, requests: [], image_deliveries: [],
+    };
+    if (details.status === "available" || details.status === "loaded") {
+      this.inputTracker.declareMesh({ path: details.path, sourcePath: details.mesh.source_path,
+        role: "reference_mesh", origin: details.origin ?? "supplied", provenance: details.mesh.provenance });
+      guidance.enabled = true;
+      guidance.mesh = details.mesh;
+      if (details.status === "available") guidance.available_by_stage[details.stage] = (guidance.available_by_stage[details.stage] ?? 0) + 1;
+    } else if (details.status === "images_attached") {
+      guidance.image_deliveries.push({ ...details, at: now() });
+    } else if (details.request_id) {
+      const index = guidance.requests.findIndex((request: Data) => request.request_id === details.request_id);
+      if (index < 0) guidance.requests.push(details);
+      else guidance.requests[index] = { ...guidance.requests[index], ...details };
+    }
+    guidance.render_requests = guidance.requests.length;
+    guidance.successful_renders = guidance.requests.filter((request: Data) => request.status === "completed").length;
+    guidance.failed_renders = guidance.requests.filter((request: Data) => ["failed", "aborted", "interrupted"].includes(request.status)).length;
+    guidance.reference_mesh_used = guidance.image_deliveries.length > 0;
     this.flush();
   }
   addTiming(name: string, ms: number): void {
@@ -232,6 +271,11 @@ export class RunRecorder implements TrackingSink {
     this.attempt.duration_ms = performance.now() - this.start;
     this.attempt.outcome = outcome;
     this.attempt.error = error === undefined ? null : safeError(error);
+    if (this.attempt.mesh_guidance) for (const request of this.attempt.mesh_guidance.requests) {
+      if (request.status === "started") request.status = "interrupted";
+    }
+    if (this.attempt.mesh_guidance) this.attempt.mesh_guidance.failed_renders = this.attempt.mesh_guidance.requests
+      .filter((request: Data) => ["failed", "aborted", "interrupted"].includes(request.status)).length;
     for (const call of this.calls.values()) if (call.attempt_id === this.attemptId && call.status === "started") {
       call.status = "interrupted"; call.usage_status = "unknown";
     }

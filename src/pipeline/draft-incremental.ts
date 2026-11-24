@@ -40,7 +40,10 @@ import { join, resolve, dirname, basename } from "node:path";
 import { tmpdir } from "node:os";
 
 import { createStageEmitter } from "../trajectory/emitter.ts";
-import { generateOnce } from "../llm/generate.ts";
+import { generateOnce, generateWithTools, type GenerationTool } from "../llm/generate.ts";
+import { createMeshGuidanceTool, MESH_GUIDANCE_MANIFEST, MESH_GUIDANCE_POLICY, snapshotMeshGuidance } from "./mesh-guidance.ts";
+import { recordReferenceInputs, trackingContext } from "../tracking/context.ts";
+import type { ReferenceInput } from "../tracking/inputs.ts";
 import type { ModelRef } from "@harness/template/types";
 import type {
   CanonicalPart,
@@ -398,6 +401,8 @@ export interface IncrementalDraftOpts {
   /** When set, skip image-gen and use this image file as the reference (copied
    * to <outputDir>/image.png). Mirrors runDraft's `inputImage`. */
   inputImage?: string;
+  /** Optional GLB, exposed only through an on-demand per-part rendering tool. */
+  guidanceMesh?: string;
   /**
    * Text-only mode: generate from the prompt with NO reference image at all.
    *
@@ -2123,6 +2128,9 @@ export async function runIncrementalDraft(
 ): Promise<IncrementalDraftResult> {
   const text = opts.text.trim();
   if (!text) throw new Error("runIncrementalDraft: `text` is required (and non-empty)");
+  if ((opts.guidanceMesh !== undefined || (opts.resume && existsSync(join(opts.outputDir, MESH_GUIDANCE_MANIFEST))))
+      && (opts.textOnly || (!opts.inputImage && !existsSync(join(opts.outputDir, "image.png")))))
+    throw new Error("GLB guidance requires a primary reference image.");
   const log = opts.log ?? ((s) => console.log(s));
   const t0 = Date.now();
 
@@ -2200,10 +2208,8 @@ export async function runIncrementalDraft(
   const sink = opts.trajectorySink ?? localWriter!.sink;
   const trajectoryPath = opts.trajectoryPathOverride ?? localWriter!.path;
 
-  // No harness. This stage never calls a tool: it makes one-shot generations
-  // (plan, plan review, one per part) and writes trajectory events. The harness
-  // was carrying a session store, an event bus, a sandbox and a ruleset for a
-  // loop that does not exist here — see src/trajectory/emitter.ts.
+  // Planning remains one-shot. Part generation can optionally call the narrow
+  // GLB rendering tool; it never receives a shell or a general file editor.
   const sessionId = `sess_${nextId("d").slice(2)}`;
   const runId = nextId("run");
   const emitter = createStageEmitter({
@@ -2217,13 +2223,15 @@ export async function runIncrementalDraft(
   emit("run.started", { runId });
 
   async function llmGenerate(
-    system: string, userContent: CanonicalPart[], label: string,
+    system: string, userContent: CanonicalPart[], label: string, tool?: GenerationTool,
+    onImagesAttached?: (toolCallIds: string[]) => void,
   ): Promise<{ rawText: string; reasoning: string }> {
     const tLLM = Date.now();
-    const r = await generateOnce({
+    const args = {
       route, model: scadModelRef, system, parts: userContent, label,
       ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
-    });
+    };
+    const r = tool ? await generateWithTools({ ...args, tool, onImagesAttached }) : await generateOnce(args);
     addStage("llm.generate", Date.now() - tLLM);
     return { rawText: r.text, reasoning: r.reasoning };
   }
@@ -2277,14 +2285,22 @@ export async function runIncrementalDraft(
 
   try {
     // ── Stage A: image (provided input, generated, or skipped entirely) ──
+    const guidance = snapshotMeshGuidance(outDir, opts.guidanceMesh, Boolean(opts.resume));
+    if (guidance) {
+      log(`[inc-draft] GLB guidance ready — optional on-demand views for part generation only (${guidance.sha256.slice(0, 12)})`);
+      const loaded = { status: "loaded", mesh: guidance, path: join(outDir, guidance.path),
+        origin: opts.resume ? "resumed" : "supplied" };
+      trackingContext()?.recorder.recordMeshGuidance(loaded);
+      emit("draft.mesh_guidance", loaded);
+    }
     if (textOnly) {
       // Nothing to do. Saying so explicitly matters because every later stage
       // reads the ABSENCE of image.png as the mode switch, and a silent skip
       // here would look identical to a failed image-gen in the log.
       log(`[inc-draft] TEXT-ONLY — no reference image will be generated or used`);
       emit("draft.image.skipped", { source: "text-only", bytes: 0 });
-    } else if (opts.inputImage) {
-      const src = resolve(opts.inputImage);
+    } else if (opts.inputImage || (opts.resume && existsSync(imagePath))) {
+      const src = resolve(opts.inputImage ?? imagePath);
       if (!existsSync(src)) throw new Error(`inputImage not found: ${src}`);
       log(`[inc-draft] image-gen SKIPPED — using provided image ${src}`);
       if (resolve(imagePath) !== src) copyFileSync(src, imagePath);
@@ -2315,7 +2331,12 @@ export async function runIncrementalDraft(
           `(set PROCEDURA_IMAGE_MODEL to enable extra reference views)`);
     }
     const extraRefs = canGenExtras ? wantExtraRefs : 0;
+    if (guidance && 1 + extraRefs + 1 > 16)
+      throw new Error("Primary and generated references must leave one of the 16 image slots free for GLB guidance.");
     if (!textOnly && refImageSize > 0) log(`[inc-draft] reference images normalized to ${refImageSize}px longest-side`);
+    const primaryReference: ReferenceInput[] = textOnly ? [] : [{ path: imagePath, role: "primary_image",
+      sourcePath: opts.inputImage, origin: opts.inputImage ? "supplied" : opts.resume ? "resumed" : "generated" }];
+    const referenceInputs = [...primaryReference];
     const refImages: { label: string; b64: string }[] = textOnly ? [] : [
       { label: "primary", b64: loadImageBase64(imagePath, refImageSize) },
     ];
@@ -2327,6 +2348,7 @@ export async function runIncrementalDraft(
         log(`[inc-draft] multi-ref: generating extra ref ${k + 2} — ${viewPhrase}`);
         await genImage(buildExtraRefPrompt(text, viewPhrase), refPath);
         refImages.push({ label: viewPhrase, b64: loadImageBase64(refPath, refImageSize) });
+        referenceInputs.push({ path: refPath, role: "auxiliary_image", sourcePath: null, origin: "generated", provenance: "generated_alternate_view" });
       } catch (e) {
         log(`[inc-draft] extra ref ${k + 2} gen failed: ${(e as Error).message} — skipping`);
       }
@@ -2339,7 +2361,10 @@ export async function runIncrementalDraft(
     // Attach the full reference set under `header`. With a single ref the format
     // is unchanged; with several, the primary is flagged authoritative and the
     // generated alternates as supplementary viewpoints.
-    const refParts = (header: string): CanonicalPart[] => {
+    if (refImages.length + (guidance ? 1 : 0) > 16)
+      throw new Error("Reference images exceed the 16-image budget; GLB guidance needs one free slot.");
+    const refParts = (header: string, stage: string): CanonicalPart[] => {
+      recordReferenceInputs(stage, referenceInputs);
       // Text-only: say plainly that there is no image rather than attaching
       // none silently. A prompt whose body says "match the reference" with no
       // reference attached invites the model to invent one and describe it.
@@ -2415,7 +2440,7 @@ export async function runIncrementalDraft(
           "Produce the ordered JSON build plan now. Return ONLY the JSON array.";
         const { rawText, reasoning } = await llmGenerate(planSystem, [
           { kind: "text", text: planUserText },
-          ...refParts("Reference image"),
+          ...refParts("Reference image", "planning"),
         ], "draft.plan");
         writeFileSync(join(outDir, "plan_response.txt"), rawText, "utf8");
         if (reasoning.trim()) writeFileSync(join(outDir, "plan_thinking.txt"), reasoning, "utf8");
@@ -2482,7 +2507,7 @@ export async function runIncrementalDraft(
               `=== CURRENT PLAN (${plan.length} parts) ===\n${planText}\n\n` +
               "Return ONLY the JSON object {ok, notes, plan}.",
           },
-          ...refParts("Reference image (whole object)"),
+          ...refParts("Reference image (whole object)", "plan_review"),
         ];
         let rawText = ""; let reasoning = "";
         try {
@@ -2630,7 +2655,7 @@ export async function runIncrementalDraft(
               (parseErr ? `Your previous reply could not be parsed (${parseErr}). ` : "") +
               "Return ONLY the JSON object.",
           },
-          ...refParts("Reference image (whole object)"),
+          ...refParts("Reference image (whole object)", "next_part_selection"),
         ];
         if (views.length > 0) {
           userParts.push({
@@ -2841,10 +2866,10 @@ export async function runIncrementalDraft(
             "Return ONLY the block (same format).";
         }
         userParts.push({ kind: "text", text: userText });
-        userParts.push(...refParts("Reference image (whole object)"));
+        userParts.push(...refParts("Reference image (whole object)", "part_generation"));
         // Image budget: the provider caps a message at 16 images. Reserve slots
         // for the reference set, then attach as many build views as still fit.
-        const viewBudget = Math.max(0, 16 - refImages.length);
+        const viewBudget = Math.max(0, 16 - refImages.length - (guidance ? 1 : 0));
         const attachViews = buildViews.slice(0, viewBudget);
         if (attachViews.length) {
           userParts.push({
@@ -2861,7 +2886,29 @@ export async function runIncrementalDraft(
         }
 
         emit("draft.part.gen_requested", { name: part.name, attempt });
-        const { rawText, reasoning } = await llmGenerate(partSystem, userParts, "draft.part." + part.name);
+        const tool = guidance ? createMeshGuidanceTool({
+          output: outDir, snapshot: guidance, part: part.name, attempt, signal: opts.signal, emit,
+        }) : undefined;
+        if (guidance) {
+          trackingContext()?.recorder.recordMeshGuidance({ status: "available", stage: "part_generation",
+            part: part.name, generation_attempt: attempt, mesh: guidance,
+            path: join(outDir, guidance.path), origin: opts.resume ? "resumed" : "supplied" });
+          userParts.push({ kind: "text", text: MESH_GUIDANCE_POLICY });
+        }
+        const onImagesAttached = guidance ? (toolCallIds: string[]) => {
+          const delivery = { status: "images_attached", stage: "part_generation",
+            part: part.name, generation_attempt: attempt, tool_call_ids: toolCallIds };
+          trackingContext()?.recorder.recordMeshGuidance(delivery);
+          emit("draft.mesh_guidance", delivery);
+          recordReferenceInputs("part_generation", [...referenceInputs, {
+            path: join(outDir, guidance.path), sourcePath: guidance.source_path, role: "reference_mesh",
+            origin: opts.resume ? "resumed" : "supplied", provenance: guidance.provenance,
+          }]);
+        } : undefined;
+        const { rawText, reasoning } = await llmGenerate(
+          guidance ? partSystem + "\n\n" + MESH_GUIDANCE_POLICY : partSystem,
+          userParts, "draft.part." + part.name, tool, onImagesAttached,
+        );
         writeFileSync(join(partDir, `gen_response_${attempt}.txt`), rawText, "utf8");
         if (reasoning.trim()) writeFileSync(join(partDir, `gen_thinking_${attempt}.txt`), reasoning, "utf8");
         recordTurn(`(generate part ${part.name})`, true, rawText, reasoning, {

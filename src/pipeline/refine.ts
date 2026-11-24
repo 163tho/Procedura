@@ -13,6 +13,7 @@
  */
 
 import { fileURLToPath } from "node:url";
+import { recordReferenceInputs } from "../tracking/context.ts";
 import { readFileSync, mkdirSync, writeFileSync, appendFileSync, existsSync, readdirSync, rmSync, renameSync, copyFileSync } from "node:fs";
 import { join, basename } from "node:path";
 
@@ -134,6 +135,9 @@ export const DEFAULT_REFINE_STEPS = Number(process.env["PROCEDURA_REFINE_STEPS"]
 
 export async function runRefine(opts: RefineOpts): Promise<RefineResult> {
   const workspace = resolveWorkspace(opts.outputDir);
+  recordReferenceInputs("refinement", workspace.hasImage
+    ? [{ path: workspace.imagePath, role: "primary_image" }]
+    : []);
   const state = createSessionState(
     workspace,
     opts.artifactsSubdir ? { artifactsSubdir: opts.artifactsSubdir } : undefined,

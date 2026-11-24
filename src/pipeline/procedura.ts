@@ -37,6 +37,7 @@ import { runPaint, type PaintResult } from "./paint.ts";
 import { runMotionExport, type MotionExportResult } from "./motion.ts";
 import type { MotionCollisionApproximation } from "../motion/types.ts";
 import { renderAOViews } from "../render/ao.ts";
+import { MESH_GUIDANCE_MANIFEST, snapshotMeshGuidance } from "./mesh-guidance.ts";
 
 export interface RunProceduraOpts {
   /** Free-text prompt. Required unless artifacts already exist in outputDir. */
@@ -53,6 +54,8 @@ export interface RunProceduraOpts {
   /** When set, skip image-gen in the draft phase and use this image file as
    *  the reference (copied to <outputDir>/image.png). SCAD-gen still runs. */
   inputImage?: string;
+  /** Hunyuan3D GLB: optional on-demand views during per-part generation only. */
+  guidanceMesh?: string;
   /** Text-only: generate with NO reference image at all. Skips image-gen in the
    *  draft; refine and paint follow automatically by detecting the absent
    *  image.png. Incremental draft only — `runDraft` still needs an image. */
@@ -234,6 +237,19 @@ export async function runProcedura(opts: RunProceduraOpts): Promise<RunProcedura
 
 async function runProceduraImpl(opts: RunProceduraOpts): Promise<RunProceduraResult> {
   const outDir = resolve(opts.outputDir);
+  const draftIncomplete = Boolean(opts.incremental) && !opts.redo && isDraftIncomplete(outDir);
+  const needDraft = opts.redo || !hasDraftArtifacts(outDir) || draftIncomplete;
+  const savedGuidance = !opts.redo && existsSync(join(outDir, MESH_GUIDANCE_MANIFEST));
+  if ((opts.guidanceMesh !== undefined || (savedGuidance && needDraft)) && !opts.motionOnly) {
+    if (!opts.incremental || opts.textOnly || (!opts.inputImage && (opts.redo || !existsSync(join(outDir, "image.png")))))
+      throw new Error("GLB guidance requires incremental reconstruction and a primary image; it cannot be used with one-shot or text-only drafting.");
+    // Also validate guidance on a completed-draft reuse, before silently skipping
+    // draft. Adding or changing it requires a new run or --redo.
+    if (!opts.redo && (hasDraftArtifacts(outDir) || existsSync(join(outDir, "plan.json"))))
+      snapshotMeshGuidance(outDir, opts.guidanceMesh, true);
+  }
+  if (opts.guidanceMesh !== undefined && opts.motionOnly)
+    throw new Error("GLB guidance is unavailable in motion-only mode.");
   mkdirSync(outDir, { recursive: true });
   mkdirSync(join(outDir, "_trajectory"), { recursive: true });
 
@@ -306,8 +322,6 @@ async function runProceduraImpl(opts: RunProceduraOpts): Promise<RunProceduraRes
 
   // Resume a killed incremental build (partial draft present) instead of
   // skipping it as complete.
-  const draftIncomplete = Boolean(opts.incremental) && !opts.redo && isDraftIncomplete(outDir);
-  const needDraft = opts.redo || !hasDraftArtifacts(outDir) || draftIncomplete;
   if (draftIncomplete) console.log(`  (incremental draft is INCOMPLETE — resuming remaining parts)`);
 
   let draftResult: DraftResult | IncrementalDraftResult | undefined;
@@ -330,11 +344,12 @@ async function runProceduraImpl(opts: RunProceduraOpts): Promise<RunProceduraRes
           ...(opts.scadModel !== undefined ? { scadModel: opts.scadModel } : {}),
           ...(opts.imageModel !== undefined ? { imageModel: opts.imageModel } : {}),
           ...(opts.inputImage !== undefined ? { inputImage: opts.inputImage } : {}),
+          ...(opts.guidanceMesh !== undefined ? { guidanceMesh: opts.guidanceMesh } : {}),
           ...(opts.textOnly ? { textOnly: true } : {}),
           ...(opts.contextRenders ? { contextRenders: true } : {}),
           ...(opts.extraRefs !== undefined ? { extraRefs: opts.extraRefs } : {}),
           exportStl,
-          resume: draftIncomplete,
+          resume: !opts.redo && (existsSync(join(outDir, "plan.json")) || existsSync(join(outDir, MESH_GUIDANCE_MANIFEST))),
           motionAware: opts.motionAware
             ?? Boolean(opts.incremental && opts.motion && opts.incrementalMotion !== false),
           assemblyAware: Boolean(opts.incremental && opts.assembly),

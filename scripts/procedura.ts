@@ -15,6 +15,7 @@ import { beginStaging, rebaseStagedPaths } from "../src/pipeline/local-staging.t
 import { runProcedura } from "../src/pipeline/procedura.ts";
 import { imageGenAvailable, imageGenDisabledReason } from "../src/imagegen/images.ts";
 import type { MotionCollisionApproximation } from "../src/motion/types.ts";
+import { validateGuidanceGlb } from "../src/pipeline/mesh-guidance.ts";
 
 interface Args {
   outputDir: string;
@@ -25,6 +26,7 @@ interface Args {
   scadModel?: string;
   imageModel?: string;
   image?: string;
+  guidanceMesh?: string;
   experimentName?: string;
   datasetId?: string;
   repetition?: number;
@@ -88,6 +90,12 @@ function parseArgs(argv: string[]): Args {
     if (a === "--scad-model")                 { args.scadModel = argv[++i]!; continue; }
     if (a === "--image-model")                { args.imageModel = argv[++i]!; continue; }
     if (a === "--image")                      { args.image = argv[++i]!; continue; }
+    if (a === "--guidance-mesh") {
+      const path = argv[++i];
+      if (!path || path.startsWith("--")) { console.error("--guidance-mesh requires a .glb path"); process.exit(2); }
+      args.guidanceMesh = resolvePath(path);
+      continue;
+    }
     if (a === "--no-image")                   { args.noImage = true; continue; }
     if (a === "--redo")                       { args.redo = true; continue; }
     if (a === "--local-staging")              { args.staging = "always"; continue; }
@@ -149,6 +157,14 @@ function parseArgs(argv: string[]): Args {
     console.error(`--3d-feedback requires the part-by-part draft: there are no intermediate builds to render in a one-shot draft`);
     process.exit(2);
   }
+  if (args.guidanceMesh !== undefined) {
+    if (!args.incremental || args.noImage || args.motionOnly || (!args.image && (args.redo || !existsSync(join(resolvePath(args.outputDir), "image.png"))))) {
+      console.error("--guidance-mesh requires incremental reconstruction with --image (or an existing image.png on resume).");
+      process.exit(2);
+    }
+    try { validateGuidanceGlb(args.guidanceMesh); }
+    catch (error) { console.error((error as Error).message); process.exit(2); }
+  }
   // No reference, and no way to make one. Rather than refuse, run text-only —
   // that is the default configuration, and it is a real mode, not a degraded
   // one. Say so out loud, because a reference changes what the run is doing.
@@ -189,6 +205,9 @@ Options:
   --prompt-file PATH     read prompt from a UTF-8 file
   --image PATH           reconstruct THIS image. Raises fidelity a lot — the
                          best-quality runs all supply one.
+  --guidance-mesh PATH   optional Hunyuan3D .glb. The incremental generator can
+                         request custom views for uncertain areas. Planning and
+                         refinement never receive it; reconstruction starts fresh.
   --no-image             TEXT ONLY: no reference image anywhere in the run. This
                          is the DEFAULT when none is supplied and image
                          generation is off; the flag states it explicitly.
@@ -338,6 +357,7 @@ try {
   ...(prompt !== undefined ? { text: prompt } : {}),
   ...(args.maxSteps !== undefined ? { maxSteps: args.maxSteps } : {}),
   ...(args.image !== undefined ? { inputImage: args.image } : {}),
+  ...(args.guidanceMesh !== undefined ? { guidanceMesh: args.guidanceMesh } : {}),
   ...(args.noImage ? { textOnly: true } : {}),
   ...(args.agentModel !== undefined ? { agentModel: args.agentModel } : {}),
   ...(args.scadModel !== undefined ? { scadModel: args.scadModel } : {}),

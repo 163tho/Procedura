@@ -1,12 +1,15 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 
 import type { Pricing } from "./pricing.ts";
+import type { ReferenceInput } from "./inputs.ts";
 
 export interface TrackingSink {
   readonly pricing: Pricing;
   addTiming(name: string, ms: number): void;
   addWait(ms: number): void;
   skipPhase(name: string, reason: string): void;
+  recordReferences(stage: string, references: readonly ReferenceInput[]): void;
+  recordMeshGuidance(details: Record<string, unknown>): void;
   phase<T>(name: string, fn: () => Promise<T>): Promise<T>;
   startCall(details: Record<string, unknown>): {
     update(details: Record<string, unknown>): void;
@@ -36,4 +39,8 @@ export function recordRetryWait(ms: number): void {
 
 export function skipPhase(name: string, reason: string): void {
   storage.getStore()?.recorder.skipPhase(name, reason);
+}
+
+export function recordReferenceInputs(stage: string, references: readonly ReferenceInput[]): void {
+  storage.getStore()?.recorder.recordReferences(stage, references);
 }

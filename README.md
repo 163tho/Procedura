@@ -18,6 +18,10 @@
 It builds one part at a time, checks and improves the shape, adds materials,
 and exports files for moving parts.
 
+On `experiment/direct-mesh`, the API CLI also supports
+[on-demand Hunyuan3D GLB guidance](docs/mesh-guidance.md) for uncertain areas
+during incremental part generation.
+
 **Run it inside Codex or Claude Code through MCP.** It uses the model in your
 current session. You do not need a separate model API key. Your agent's usual
 usage limits and billing apply.

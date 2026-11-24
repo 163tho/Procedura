@@ -9,6 +9,12 @@ beside its model outputs:
 This applies to the API CLI, batch and Studio calls to runProcedura.
 No billing login or extra generation request is needed.
 
+GLB-guided incremental runs also record the frozen reference mesh, per-stage
+reference sets, tool availability, requested camera views, render failures and
+image deliveries. Local rendering remains separate from model API accounting.
+See [mesh guidance tracking](mesh-guidance.md#tracking-changes) and the
+[commented JSONC example](mesh-guidance.example.jsonc).
+
 ## Running and reading a record
 
 Existing commands work unchanged. Optional labels help group thesis experiments:

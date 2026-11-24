@@ -38,7 +38,9 @@ export type CanonicalPart =
   | { kind: "text"; text: string }
   | { kind: "image"; data: string; mimeType: string }
   | { kind: "document"; data: string; mimeType: string; filename?: string }
-  | { kind: "tool-call"; toolCallId: string; toolName: string; input: JsonObject }
+  | { kind: "tool-call"; toolCallId: string; toolName: string; input: JsonObject;
+      /** Opaque Gemini function-call signature; echo it unchanged on continuation. */
+      thoughtSignature?: string }
   | { kind: "tool-result"; toolCallId: string; toolName?: string;
       output: string | JsonObject; isError?: boolean;
       /** Optional images that came back from the tool (e.g. renders). */
@@ -77,7 +79,7 @@ export type LLMEvent =
   | { kind: "message-start" }
   | { kind: "text-delta"; text: string }
   | { kind: "thinking-delta"; text: string; signature?: string }
-  | { kind: "tool-call-start"; toolCallId: string; toolName: string }
+  | { kind: "tool-call-start"; toolCallId: string; toolName: string; thoughtSignature?: string }
   | { kind: "tool-call-delta"; toolCallId: string; argDelta: string }
   | { kind: "tool-call-finish"; toolCallId: string; input: JsonObject }
   | { kind: "message-finish"; reason: FinishReason; usage: TokenUsage }

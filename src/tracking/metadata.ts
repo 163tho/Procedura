@@ -1,11 +1,14 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { cpus, totalmem } from "node:os";
-import { join, resolve } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_MODEL, resolveModel } from "../config/models.ts";
 
 export const SOURCE_ROOT = fileURLToPath(new URL("../../", import.meta.url));
+export function sourceRelativePath(path: string): string {
+  return relative(SOURCE_ROOT, resolve(path)).split(sep).join("/") || ".";
+}
 export const hash = (data: string | Uint8Array) => createHash("sha256").update(data).digest("hex");
 export function fileRecord(path: string) {
   if (!existsSync(path) || !statSync(path).isFile()) return null;
@@ -50,7 +53,7 @@ const allowedOptions = [
   "contextRenders", "assembly", "extraRefs", "noPlan", "refine", "exportStl", "paint", "paintModel", "motion",
   "motionModel", "motionPlanPath", "motionAware", "incrementalMotion", "motionOnly", "motionUseLlm", "motionRefine",
   "motionAuthor", "motionFixedBase", "motionCollision", "motionUrdf", "motionValidate", "motionSimRefine",
-  "experimentName", "datasetId", "repetition", "pricingFile",
+  "experimentName", "datasetId", "repetition", "pricingFile", "guidanceMesh",
 ];
 const allowedEnvironment = [
   "PROCEDURA_PROVIDER", "PROCEDURA_MODEL", "PROCEDURA_IMAGE_MODEL", "PROCEDURA_REASONING_EFFORT", "PROCEDURA_REFINE_MODE",
@@ -82,6 +85,9 @@ export function configuration(opts: Record<string, any>) {
       refine_max_steps: opts.maxSteps ?? 6, paint: opts.paint ?? false, motion: opts.motion ?? false,
       no_plan: Boolean(opts.noPlan) || process.env.PROCEDURA_NO_PLAN === "1",
       context_renders: opts.contextRenders ?? false,
+      mesh_guidance: { requested: Boolean(opts.guidanceMesh), mode: "on_demand_views", usage: "uncertainty_only",
+        available_stages: ["incremental_part_generation", "incremental_part_retry"], initialization: false,
+        max_tool_calls_per_generation: 8, render_size: 768, render_samples: 32 },
       assembly_aware: Boolean(opts.incremental && opts.assembly) && process.env.PROCEDURA_INCREMENTAL_ASSEMBLY !== "0",
       motion_aware: (opts.motionAware ?? Boolean(opts.incremental && opts.motion && opts.incrementalMotion !== false))
         && process.env.PROCEDURA_INCREMENTAL_MOTION !== "0",
@@ -114,6 +120,7 @@ export function environmentMetadata() {
 }
 export function outputMetadata(output: string) {
   const names = ["image.png", "prompt.txt", "effective_text.txt", "draft.scad", "draft.obj", "final.scad", "final.obj", "final.stl", "final_summary.txt",
-    "plan.json", "parts_summary.json", "final_materials.json", "final_painted.obj", "motion/motion_plan.json"];
+    "plan.json", "parts_summary.json", "final_materials.json", "final_painted.obj", "motion/motion_plan.json",
+    "mesh_guidance.json", "_mesh_guidance/reference.glb"];
   return Object.fromEntries(names.filter(name => existsSync(join(output, name))).map(name => [name, fileRecord(join(output, name))]));
 }

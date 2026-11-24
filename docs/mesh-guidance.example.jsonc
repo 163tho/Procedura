@@ -1,0 +1,103 @@
+{
+  // Documentation only. The CLI does not load this JSONC as a config file.
+  // Copy these options into runProcedura({...}) or use the equivalent flags.
+  "configuration_example": {
+    "outputDir": "outputs/assault_buggy_glb_guidance",
+    "text": "Replace with the reconstruction brief, e.g. read from brief.txt.",
+    "inputImage": "/path/to/original_reference.png", // --image; authoritative target
+    "guidanceMesh": "/path/to/hunyuan_reconstruction.glb", // --guidance-mesh; approximate only
+    "incremental": true, // Required. The procedural reconstruction starts from the normal empty scaffold.
+    "contextRenders": true, // Optional --3d-feedback: views of the growing procedural model
+    "refine": true, // Keep normal refinement; the reference GLB/tool is excluded from it.
+    "experimentName": "glb_on_demand", // --experiment
+    "datasetId": "assault_buggy", // --dataset-id
+    "repetition": 1 // --repetition
+  },
+
+  // Example LLM tool arguments. The generator chooses these on demand.
+  // This is not another runProcedura option and is not a fixed view set.
+  "tool_request_example": {
+    "camera_position": [3, -4, 3], // Imported Z-up frame; bbox centered, longest side 2
+    "target": [0, 0, 0], // Aim at an uncertain region for a close-up (coordinates within ±1).
+    "projection": "orthographic", // Or "perspective"
+    "ortho_scale": 2.5, // Lower for a close-up; 0.05–8. Used by orthographic projection.
+    "fov_degrees": 45, // 15–100; used by perspective projection
+    "reason": "The original image leaves the rear body depth uncertain."
+  },
+
+  // Illustrative fragment of run.json.attempts[last]. Values/IDs/hashes below
+  // are examples, not measurements. Existing timing, API usage, cost, outcome,
+  // source and invocation-history fields continue to be written normally.
+  "tracking_example": {
+    "inputs": {
+      "reference_meshes": [{
+        "role": "reference_mesh",
+        "source_path": "../dataset/hunyuan_reconstruction.glb", // Relative to Procedura-mesh checkout
+        "run_copy": "_mesh_guidance/reference.glb", // Relative to this output directory
+        "sha256": "<actual SHA-256 of frozen GLB>",
+        "bytes": 123456,
+        "origin": "supplied",
+        "provenance": "hunyuan3d_from_primary_image"
+      }]
+      // primary_image, auxiliary_images, prompt/hash and motion_plan also exist.
+    },
+    "input_summary": {
+      "mode": "images_and_mesh", // Includes supplied GLB availability; see reference_mesh_used.
+      "reference_mesh_count": 1,
+      "reference_mesh_used": true, // False if no GLB view was attached to a continuation.
+      "used_by_stage": {
+        "planning": "single_image",
+        "plan_review": "single_image",
+        "part_generation": "images_and_mesh",
+        "refinement": "single_image"
+        // next_part_selection is recorded instead when --no-plan is used.
+        // Unexecuted/skipped stages are marked not_run/skipped, not inferred.
+      }
+    },
+    "mesh_guidance": {
+      "enabled": true, // Frozen GLB loaded; this alone does not imply inspection.
+      "mode": "on_demand_views",
+      "usage": "uncertainty_only",
+      "initialization": false, // No GLB geometry is imported into the reconstruction.
+      "available_by_stage": { "part_generation": 3 }, // Generation attempts, including retries
+      "render_requests": 1,
+      "successful_renders": 1,
+      "failed_renders": 0,
+      "reference_mesh_used": true,
+      "requests": [{
+        "request_id": "<view UUID>",
+        "tool_call_id": "<model tool-call ID>",
+        "part": "rear_body",
+        "generation_attempt": 1,
+        "mesh_sha256": "<same frozen GLB hash>",
+        "requested_camera": {
+          "camera_position": [3, -4, 3],
+          "target": [0, 0, 0],
+          "reason": "Rear depth is uncertain."
+        },
+        "started_at": "2026-11-10T12:00:00.000Z",
+        "duration_ms": 2300,
+        "status": "completed", // Or started, failed, aborted, interrupted
+        "image": {
+          "run_copy": "_mesh_guidance/views/<view UUID>/view.png",
+          "sha256": "<actual returned PNG hash>",
+          "bytes": 54321
+        }
+        // camera contains defaults/validated values; metadata contains imported
+        // frame, normalization, approximate bbox sizes and textures_used:false.
+        // A failed request has error and duration_ms; it has no successful image.
+      }],
+      "image_deliveries": [{
+        "status": "images_attached",
+        "stage": "part_generation",
+        "part": "rear_body",
+        "generation_attempt": 1,
+        "tool_call_ids": ["<model tool-call ID>"],
+        "at": "2026-11-10T12:00:02.300Z"
+      }]
+      // mesh contains the frozen manifest: source path, run copy, hash, bytes,
+      // provenance, permitted incremental stages and initialization:false.
+      // Availability, requested renders and attached images are separate facts.
+    }
+  }
+}

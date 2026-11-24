@@ -38,6 +38,7 @@
  */
 
 import { fileURLToPath } from "node:url";
+import { recordReferenceInputs } from "../tracking/context.ts";
 import { join } from "node:path";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { basename } from "node:path";
@@ -240,6 +241,9 @@ async function measureModules(
 
 export async function runDirectRefine(opts: RefineOpts): Promise<RefineResult> {
   const workspace = resolveWorkspace(opts.outputDir);
+  recordReferenceInputs("refinement", workspace.hasImage
+    ? [{ path: workspace.imagePath, role: "primary_image" }]
+    : []);
   const state = createSessionState(
     workspace,
     opts.artifactsSubdir ? { artifactsSubdir: opts.artifactsSubdir } : undefined,

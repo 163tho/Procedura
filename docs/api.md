@@ -7,6 +7,12 @@ provider credentials and uses the API CLI defaults described below. For the MCP
 release, use the coding-agent tutorial: generation happens in your existing
 Codex or Claude Code session, and its default profile enables the full pipeline.
 
+For Hunyuan3D GLB reference input during incremental reconstruction, see
+[on-demand mesh guidance](mesh-guidance.md) and the
+[commented configuration/tracking example](mesh-guidance.example.jsonc).
+Use `--image original.png --guidance-mesh reconstruction.glb`: only per-part
+generation and retries receive the optional custom-camera rendering tool.
+
 ## Install
 
 One command installs everything: Bun, the packages, a Manifold-capable OpenSCAD,
